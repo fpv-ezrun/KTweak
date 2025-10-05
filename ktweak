@@ -206,5 +206,85 @@ do
 	write "$queue/nr_requests" 128
 done
 
+if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
+    echo "=== GPU tuning (Adreno 506) ==="
+
+    # Gouverneur GPU : performance = fréquence stable (pas d'oscillation)
+    if [[ -f /sys/class/kgsl/kgsl-3d0/devfreq/governor ]]; then
+        write /sys/class/kgsl/kgsl-3d0/devfreq/governor performance
+    fi
+
+    # Fréquence GPU : 90–100 % du max
+    max_freq=$(cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq)
+    if [[ -n "$max_freq" ]]; then
+        write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq "$((max_freq * 9 / 10))"
+        write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq "$max_freq"
+    fi
+
+    # Force le rail et le bus du GPU actifs (évite les coupures/retards)
+    write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
+    write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
+    write /sys/class/kgsl/kgsl-3d0/force_rail_on 1
+
+    # Active la latence basse dans le driver (si supporté)
+    if [[ -f /sys/class/kgsl/kgsl-3d0/bus_split ]]; then
+        write /sys/class/kgsl/kgsl-3d0/bus_split 0
+    fi
+fi
+
+# --- Bus mémoire GPU (GPUBW) -------------------------------
+if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
+    echo "=== GPUBW tuning ==="
+    max_bw=$(cat /sys/class/devfreq/soc:qcom,gpubw/max_freq)
+    write /sys/class/devfreq/soc:qcom,gpubw/governor performance
+    write /sys/class/devfreq/soc:qcom,gpubw/min_freq "$max_bw"
+    write /sys/class/devfreq/soc:qcom,gpubw/max_freq "$max_bw"
+fi
+
+# --- Vidéo / VPU (décodage matériel) -----------------------
+# Sur Snapdragon, le VPU = venus / vidc / vcodec (selon ROM)
+for vpu in /sys/class/devfreq/*video* /sys/class/devfreq/*venus* /sys/class/devfreq/*vcodec*; do
+    [[ -d "$vpu" ]] || continue
+    echo "=== VPU tuning ($vpu) ==="
+    max_vpu=$(cat "$vpu/max_freq" 2>/dev/null)
+    if [[ -n "$max_vpu" ]]; then
+        write "$vpu/governor" performance
+        write "$vpu/min_freq" "$max_vpu"
+        write "$vpu/max_freq" "$max_vpu"
+    fi
+done
+
+# --- Autres modules multimédia --------------------------------
+# Forcer le bus mémoire principal (LLCC ou DDR)
+for bw in /sys/class/devfreq/*ddr* /sys/class/devfreq/*memlat*; do
+    [[ -d "$bw" ]] || continue
+    echo "=== Memory bus tuning ($bw) ==="
+    max_bw=$(cat "$bw/max_freq" 2>/dev/null)
+    if [[ -n "$max_bw" ]]; then
+        write "$bw/governor" performance
+        write "$bw/min_freq" "$max_bw"
+    fi
+done
+
+# --- Thermals : retarder la limitation pour éviter throttle trop précoce ---
+if [[ -f /sys/module/msm_thermal/core_control/enabled ]]; then
+    write /sys/module/msm_thermal/core_control/enabled 0
+fi
+if [[ -f /sys/module/msm_thermal/parameters/enabled ]]; then
+    write /sys/module/msm_thermal/parameters/enabled 0
+fi
+
+# --- Codec audio : stabilité du DSP / éviter reset au changement de flux ---
+# (Certaines ROM exposent ces chemins)
+for adsp in /sys/class/devfreq/*adsp* /sys/class/devfreq/*audio*; do
+    [[ -d "$adsp" ]] || continue
+    echo "=== Audio DSP tuning ($adsp) ==="
+    max_dsp=$(cat "$adsp/max_freq" 2>/dev/null)
+    if [[ -n "$max_dsp" ]]; then
+        write "$adsp/governor" performance
+        write "$adsp/min_freq" "$max_dsp"
+    fi
+done
+
 # Always return success, even if the last write fails
 exit 0
