@@ -207,139 +207,101 @@ do
 done
 
 ###############################################################################
-# === GPU tuning (Adreno 506 - mode stable & debug) ===
+# === GPU (Adreno 506) + GPUBW : profil stable (cpufreq) ===
 ###############################################################################
 if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
-    echo "=== [GPU] Tuning Adreno 506 ==="
-
-    # Choisir le gouverneur le plus stable
+    echo "=== [GPU] Adreno 506: profil stable ==="
     if grep -q "cpufreq" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
         write /sys/class/kgsl/kgsl-3d0/devfreq/governor cpufreq
-        echo "[GPU] Governor: cpufreq"
+        echo "[GPU] governor=cpufreq"
     elif grep -q "msm-adreno-tz" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
         write /sys/class/kgsl/kgsl-3d0/devfreq/governor msm-adreno-tz
-        echo "[GPU] Governor: msm-adreno-tz"
+        echo "[GPU] governor=msm-adreno-tz"
     else
         write /sys/class/kgsl/kgsl-3d0/devfreq/governor performance
-        echo "[GPU] Governor: performance"
+        echo "[GPU] governor=performance"
     fi
 
-    # Appliquer des limites stables
-    max_freq=$(cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq)
-    if [[ -n "$max_freq" ]]; then
-        min_freq=$((max_freq * 7 / 10))
-        write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq "$min_freq"
-        write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq "$max_freq"
-        echo "[GPU] Frequencies: min=${min_freq}Hz, max=${max_freq}Hz"
+    if [[ -f /sys/class/kgsl/kgsl-3d0/devfreq/max_freq ]]; then
+        gpu_max=$(cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq 2>/dev/null)
+        # garde 70%..100% (évite 0)
+        if [[ -n "$gpu_max" && "$gpu_max" -gt 0 ]]; then
+            write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq $((gpu_max * 7 / 10))
+            write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq $gpu_max
+            echo "[GPU] freq: min=$((gpu_max*7/10)) max=$gpu_max"
+        fi
     fi
 
-    # Garder bus/rails actifs
     write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
     write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
     write /sys/class/kgsl/kgsl-3d0/force_rail_on 1
 fi
 
-###############################################################################
-# === GPUBW (Bus mémoire GPU) ===
-###############################################################################
 if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
-    echo "=== [GPU] GPUBW tuning ==="
-    max_bw=$(cat /sys/class/devfreq/soc:qcom,gpubw/max_freq)
-    if [[ -n "$max_bw" ]]; then
-        write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq
-        write /sys/class/devfreq/soc:qcom,gpubw/min_freq "$((max_bw * 7 / 10))"
-        write /sys/class/devfreq/soc:qcom,gpubw/max_freq "$max_bw"
-        echo "[GPUBW] Governor: cpufreq | min=$(($max_bw * 7 / 10)) | max=$max_bw"
-    fi
-fi
-
-
-# === [STABILISATION VENUS / DSP / WIDEVINE] ===
-echo "=== [VPU/DSP Stabilization for Widevine L1] ==="
-
-# Force le firmware vidéo Venus et le DSP à rester actifs
-for node in /sys/class/subsys/*/name; do
-    if grep -qi "venus" "$node" || grep -qi "adsp" "$node"; then
-        echo "Keeping subsystem $(cat "$node") powered..."
-        subsys=$(basename "$(dirname "$node")")
-        if [[ -f /sys/class/subsys/$subsys/restart_level ]]; then
-            write /sys/class/subsys/$subsys/restart_level "related"
+    echo "=== [GPUBW] Bus mémoire ==="
+    # Préfère cpufreq; ne fixe min/max que si on a des valeurs valides
+    write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq
+    if [[ -f /sys/class/devfreq/soc:qcom,gpubw/available_frequencies ]]; then
+        bw_max=$(tr ' ' '\n' < /sys/class/devfreq/soc:qcom,gpubw/available_frequencies | sort -n | tail -1)
+        if [[ -n "$bw_max" && "$bw_max" -gt 0 ]]; then
+            write /sys/class/devfreq/soc:qcom,gpubw/min_freq $((bw_max * 7 / 10))
+            write /sys/class/devfreq/soc:qcom,gpubw/max_freq $bw_max
+            echo "[GPUBW] min=$((bw_max*7/10)) max=$bw_max"
         fi
     fi
-done
-
-# Fixes de stabilité du firmware Venus / DSP
-for dev in /sys/class/devfreq/*venus* /sys/class/devfreq/*video* /sys/class/devfreq/*adsp*; do
-    [[ -d "$dev" ]] || continue
-    echo "Tuning $dev for stability..."
-    if [[ -f "$dev/governor" ]]; then
-        write "$dev/governor" "performance"
-    fi
-    if [[ -f "$dev/min_freq" && -f "$dev/max_freq" ]]; then
-        maxv=$(cat "$dev/max_freq")
-        write "$dev/min_freq" "$maxv"
-        write "$dev/max_freq" "$maxv"
-    fi
-done
-
-# Évite les resets de sous-systèmes venus/dsp (protection firmware)
-for ctrl in /sys/module/subsystem_restart/parameters/enable; do
-    if [[ -f "$ctrl" ]]; then
-        write "$ctrl" 0
-        echo "Disabled subsystem auto-restart (venus/dsp crash protection)"
-    fi
-done
-
-# Garder la sécurité Widevine active (ne pas désactiver TEE ou DRM)
-echo "=== [Widevine path intact] ==="
-setprop persist.widevine.enable true
-setprop drm.service.enabled 1
-setprop media.c2.video.decode 1
-setprop debug.stagefright.ccodec 1
-setprop persist.sys.media.use_hw_avsync true
-setprop persist.vendor.media.omx true
-setprop vendor.video.disable.ubwc 0
-
-# Activer logs pour debug (affichés directement)
-echo "=== [DEBUG] Collecte des logs kernel / system ==="
-dmesg | grep -i -E "kgsl|venus|adreno|vpu|vidc|firmware|panic" | tail -n 50
-logcat -d | grep -i -E "E/|FATAL|venus|kgsl|vpu|vidc" | tail -n 50
-echo "=== [DEBUG] Fin de la collecte ==="
-
-
-
-###############################################################################
-# === Diagnostic Verbose (affiche logs système pertinents directement) ===
-###############################################################################
-echo "=== [DEBUG] Collecte de logs kernel / system ==="
-
-# GPU & kernel faults
-echo "--- Derniers GPU / KGSL / Adreno faults ---"
-dmesg | grep -iE "kgsl|adreno|gpu|kgsl-3d0|hang|fault|watchdog|panic" | tail -n 20
-
-# DSP / Audio / Video (crashs codec, dolby, venus, vidc, adsp)
-echo "--- Derniers logs multimédia / audio / video ---"
-dmesg | grep -iE "adsp|audio|dsp|video|vidc|venus|q6|fatal|reset" | tail -n 20
-
-# Kernel panic summary (si présent)
-if grep -q "Kernel panic" /proc/last_kmsg 2>/dev/null; then
-    echo "--- Extrait du dernier kernel panic ---"
-    grep -iE "panic|kgsl|adreno|adsp|fatal" /proc/last_kmsg | tail -n 20
-else
-    echo "--- Aucun kernel panic enregistré ---"
 fi
 
-# Résumé rapide
-echo "=== [DEBUG] Températures actuelles ==="
-for t in /sys/class/thermal/thermal_zone*/temp; do
-    [[ -f "$t" ]] || continue
-    name=$(basename "$(dirname "$t")")
-    val=$(cat "$t")
-    echo "$name: $((val / 1000))°C"
+###############################################################################
+# === VENUS / DSP : stabilisation sans écrire 0, + SSR correct ===
+###############################################################################
+echo "=== [VPU/DSP] Stabilisation (Widevine L1 friendly) ==="
+
+# 1) Tuner les devfreq venus/vidc/adsp SANS écrire 0
+for dev in /sys/class/devfreq/*venus* /sys/class/devfreq/*video* /sys/class/devfreq/*vidc* /sys/class/devfreq/*adsp*; do
+    [[ -d "$dev" ]] || continue
+    echo "[VPU] Tuning $dev ..."
+    [[ -f "$dev/governor" ]] && write "$dev/governor" performance
+
+    maxv=""
+    if [[ -f "$dev/available_frequencies" ]]; then
+        maxv=$(tr ' ' '\n' < "$dev/available_frequencies" | sort -n | tail -1)
+    elif [[ -f "$dev/max_freq" ]]; then
+        maxv=$(cat "$dev/max_freq" 2>/dev/null)
+    fi
+    # Applique uniquement si maxv est non nul
+    if [[ -n "$maxv" && "$maxv" -gt 0 ]]; then
+        [[ -f "$dev/min_freq" ]] && write "$dev/min_freq" "$maxv"
+        [[ -f "$dev/max_freq" ]] && write "$dev/max_freq" "$maxv"
+        echo "[VPU] $dev -> min/max=$maxv"
+    else
+        echo "[VPU] $dev: pas de fréquence valide (skip)"
+    fi
 done
 
-echo "=== [DEBUG] Fin de la collecte ==="
+# 2) Corrige le chemin SSR (msm_subsys) et met 'RELATED' pour venus/adsp
+echo "=== [SSR] Mise à jour restart_level (msm_subsys) ==="
+for d in /sys/bus/msm_subsys/devices/*; do
+    [[ -d "$d" ]] || continue
+    nfile="$d/name"
+    rfile="$d/restart_level"
+    [[ -f "$nfile" && -f "$rfile" ]] || continue
+    name=$(cat "$nfile" 2>/dev/null)
+    if echo "$name" | grep -qiE 'venus|adsp'; then
+        cur=$(cat "$rfile" 2>/dev/null)
+        echo "[SSR] $name: restart_level current=$cur"
+        echo RELATED > "$rfile" 2>/dev/null && echo "[SSR] $name: restart_level -> RELATED"
+    fi
+done
+
+# 3) Active debug SSR (verbeux)
+echo 1 > /sys/module/subsystem_restart/parameters/enable_debug 2>/dev/null
+
 ###############################################################################
+# === DEBUG ciblé (court) ===
+###############################################################################
+echo "=== [DEBUG] Derniers VENUS/KGSL ==="
+dmesg | grep -iE "venus|vidc|kgsl|adreno|gpu fault|detach context|sysmon_send_shutdown|Brought out of reset" | tail -n 80
+echo "=== [DEBUG] Fin ==="
 
 # Always return success, even if the last write fails
 exit 0
