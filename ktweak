@@ -13,6 +13,8 @@ SCHED_PERIOD="$((1 * 1000 * 1000))"
 # How many tasks should we have at a maximum in one scheduling period
 SCHED_TASKS="16"
 
+echo "toto"
+
 write() {
 	# Bail out if file does not exist
 	[[ ! -f "$1" ]] && return 1
