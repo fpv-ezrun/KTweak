@@ -253,6 +253,61 @@ if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
     fi
 fi
 
+
+# === [STABILISATION VENUS / DSP / WIDEVINE] ===
+echo "=== [VPU/DSP Stabilization for Widevine L1] ==="
+
+# Force le firmware vidéo Venus et le DSP à rester actifs
+for node in /sys/class/subsys/*/name; do
+    if grep -qi "venus" "$node" || grep -qi "adsp" "$node"; then
+        echo "Keeping subsystem $(cat "$node") powered..."
+        subsys=$(basename "$(dirname "$node")")
+        if [[ -f /sys/class/subsys/$subsys/restart_level ]]; then
+            write /sys/class/subsys/$subsys/restart_level "related"
+        fi
+    fi
+done
+
+# Fixes de stabilité du firmware Venus / DSP
+for dev in /sys/class/devfreq/*venus* /sys/class/devfreq/*video* /sys/class/devfreq/*adsp*; do
+    [[ -d "$dev" ]] || continue
+    echo "Tuning $dev for stability..."
+    if [[ -f "$dev/governor" ]]; then
+        write "$dev/governor" "performance"
+    fi
+    if [[ -f "$dev/min_freq" && -f "$dev/max_freq" ]]; then
+        maxv=$(cat "$dev/max_freq")
+        write "$dev/min_freq" "$maxv"
+        write "$dev/max_freq" "$maxv"
+    fi
+done
+
+# Évite les resets de sous-systèmes venus/dsp (protection firmware)
+for ctrl in /sys/module/subsystem_restart/parameters/enable; do
+    if [[ -f "$ctrl" ]]; then
+        write "$ctrl" 0
+        echo "Disabled subsystem auto-restart (venus/dsp crash protection)"
+    fi
+done
+
+# Garder la sécurité Widevine active (ne pas désactiver TEE ou DRM)
+echo "=== [Widevine path intact] ==="
+setprop persist.widevine.enable true
+setprop drm.service.enabled 1
+setprop media.c2.video.decode 1
+setprop debug.stagefright.ccodec 1
+setprop persist.sys.media.use_hw_avsync true
+setprop persist.vendor.media.omx true
+setprop vendor.video.disable.ubwc 0
+
+# Activer logs pour debug (affichés directement)
+echo "=== [DEBUG] Collecte des logs kernel / system ==="
+dmesg | grep -i -E "kgsl|venus|adreno|vpu|vidc|firmware|panic" | tail -n 50
+logcat -d | grep -i -E "E/|FATAL|venus|kgsl|vpu|vidc" | tail -n 50
+echo "=== [DEBUG] Fin de la collecte ==="
+
+
+
 ###############################################################################
 # === Diagnostic Verbose (affiche logs système pertinents directement) ===
 ###############################################################################
