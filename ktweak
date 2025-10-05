@@ -206,85 +206,85 @@ do
 	write "$queue/nr_requests" 128
 done
 
+###############################################################################
+# === GPU tuning (Adreno 506 - mode stable & debug) ===
+###############################################################################
 if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
-    echo "=== GPU tuning (Adreno 506) ==="
+    echo "=== [GPU] Tuning Adreno 506 ==="
 
-    # Gouverneur GPU : performance = fréquence stable (pas d'oscillation)
-    if [[ -f /sys/class/kgsl/kgsl-3d0/devfreq/governor ]]; then
+    # Choisir le gouverneur le plus stable
+    if grep -q "cpufreq" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
+        write /sys/class/kgsl/kgsl-3d0/devfreq/governor cpufreq
+        echo "[GPU] Governor: cpufreq"
+    elif grep -q "msm-adreno-tz" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
+        write /sys/class/kgsl/kgsl-3d0/devfreq/governor msm-adreno-tz
+        echo "[GPU] Governor: msm-adreno-tz"
+    else
         write /sys/class/kgsl/kgsl-3d0/devfreq/governor performance
+        echo "[GPU] Governor: performance"
     fi
 
-    # Fréquence GPU : 90–100 % du max
+    # Appliquer des limites stables
     max_freq=$(cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq)
     if [[ -n "$max_freq" ]]; then
-        write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq "$((max_freq * 9 / 10))"
+        min_freq=$((max_freq * 7 / 10))
+        write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq "$min_freq"
         write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq "$max_freq"
+        echo "[GPU] Frequencies: min=${min_freq}Hz, max=${max_freq}Hz"
     fi
 
-    # Force le rail et le bus du GPU actifs (évite les coupures/retards)
+    # Garder bus/rails actifs
     write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
     write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
     write /sys/class/kgsl/kgsl-3d0/force_rail_on 1
-
-    # Active la latence basse dans le driver (si supporté)
-    if [[ -f /sys/class/kgsl/kgsl-3d0/bus_split ]]; then
-        write /sys/class/kgsl/kgsl-3d0/bus_split 0
-    fi
 fi
 
-# --- Bus mémoire GPU (GPUBW) -------------------------------
+###############################################################################
+# === GPUBW (Bus mémoire GPU) ===
+###############################################################################
 if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
-    echo "=== GPUBW tuning ==="
+    echo "=== [GPU] GPUBW tuning ==="
     max_bw=$(cat /sys/class/devfreq/soc:qcom,gpubw/max_freq)
-    write /sys/class/devfreq/soc:qcom,gpubw/governor performance
-    write /sys/class/devfreq/soc:qcom,gpubw/min_freq "$max_bw"
-    write /sys/class/devfreq/soc:qcom,gpubw/max_freq "$max_bw"
-fi
-
-# --- Vidéo / VPU (décodage matériel) -----------------------
-# Sur Snapdragon, le VPU = venus / vidc / vcodec (selon ROM)
-for vpu in /sys/class/devfreq/*video* /sys/class/devfreq/*venus* /sys/class/devfreq/*vcodec*; do
-    [[ -d "$vpu" ]] || continue
-    echo "=== VPU tuning ($vpu) ==="
-    max_vpu=$(cat "$vpu/max_freq" 2>/dev/null)
-    if [[ -n "$max_vpu" ]]; then
-        write "$vpu/governor" performance
-        write "$vpu/min_freq" "$max_vpu"
-        write "$vpu/max_freq" "$max_vpu"
-    fi
-done
-
-# --- Autres modules multimédia --------------------------------
-# Forcer le bus mémoire principal (LLCC ou DDR)
-for bw in /sys/class/devfreq/*ddr* /sys/class/devfreq/*memlat*; do
-    [[ -d "$bw" ]] || continue
-    echo "=== Memory bus tuning ($bw) ==="
-    max_bw=$(cat "$bw/max_freq" 2>/dev/null)
     if [[ -n "$max_bw" ]]; then
-        write "$bw/governor" performance
-        write "$bw/min_freq" "$max_bw"
+        write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq
+        write /sys/class/devfreq/soc:qcom,gpubw/min_freq "$((max_bw * 7 / 10))"
+        write /sys/class/devfreq/soc:qcom,gpubw/max_freq "$max_bw"
+        echo "[GPUBW] Governor: cpufreq | min=$(($max_bw * 7 / 10)) | max=$max_bw"
     fi
-done
-
-# --- Thermals : retarder la limitation pour éviter throttle trop précoce ---
-if [[ -f /sys/module/msm_thermal/core_control/enabled ]]; then
-    write /sys/module/msm_thermal/core_control/enabled 0
-fi
-if [[ -f /sys/module/msm_thermal/parameters/enabled ]]; then
-    write /sys/module/msm_thermal/parameters/enabled 0
 fi
 
-# --- Codec audio : stabilité du DSP / éviter reset au changement de flux ---
-# (Certaines ROM exposent ces chemins)
-for adsp in /sys/class/devfreq/*adsp* /sys/class/devfreq/*audio*; do
-    [[ -d "$adsp" ]] || continue
-    echo "=== Audio DSP tuning ($adsp) ==="
-    max_dsp=$(cat "$adsp/max_freq" 2>/dev/null)
-    if [[ -n "$max_dsp" ]]; then
-        write "$adsp/governor" performance
-        write "$adsp/min_freq" "$max_dsp"
-    fi
+###############################################################################
+# === Diagnostic Verbose (affiche logs système pertinents directement) ===
+###############################################################################
+echo "=== [DEBUG] Collecte de logs kernel / system ==="
+
+# GPU & kernel faults
+echo "--- Derniers GPU / KGSL / Adreno faults ---"
+dmesg | grep -iE "kgsl|adreno|gpu|kgsl-3d0|hang|fault|watchdog|panic" | tail -n 20
+
+# DSP / Audio / Video (crashs codec, dolby, venus, vidc, adsp)
+echo "--- Derniers logs multimédia / audio / video ---"
+dmesg | grep -iE "adsp|audio|dsp|video|vidc|venus|q6|fatal|reset" | tail -n 20
+
+# Kernel panic summary (si présent)
+if grep -q "Kernel panic" /proc/last_kmsg 2>/dev/null; then
+    echo "--- Extrait du dernier kernel panic ---"
+    grep -iE "panic|kgsl|adreno|adsp|fatal" /proc/last_kmsg | tail -n 20
+else
+    echo "--- Aucun kernel panic enregistré ---"
+fi
+
+# Résumé rapide
+echo "=== [DEBUG] Températures actuelles ==="
+for t in /sys/class/thermal/thermal_zone*/temp; do
+    [[ -f "$t" ]] || continue
+    name=$(basename "$(dirname "$t")")
+    val=$(cat "$t")
+    echo "$name: $((val / 1000))°C"
 done
+
+echo "=== [DEBUG] Fin de la collecte ==="
+###############################################################################
 
 # Always return success, even if the last write fails
 exit 0
