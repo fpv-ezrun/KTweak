@@ -200,19 +200,21 @@ do
 	write "$queue/iostats" 0
 
 	# Reduce heuristic read-ahead in exchange for I/O latency
-	write "$queue/read_ahead_kb" 256
+	write "$queue/read_ahead_kb" 32
 
 	# Reduce the maximum number of I/O requests in exchange for latency
-	write "$queue/nr_requests" 128
+	write "$queue/nr_requests" 16
 done
 
 ###############################################################################
-# === GPU Adreno 506 : préférer pwrlevels à devfreq (msm8953) ===
+# === MAX PERF + STABILISATION (L1 préservé) : GPU + GPUBW + VPU(venus) + ADSP
 ###############################################################################
-if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
-  echo "=== [GPU] Adreno 506 : pwrlevel first ==="
 
-  # Gouverneur devfreq: garder cpufreq si dispo (stabilité vidéo), sinon msm-adreno-tz
+# ---------- GPU (Adreno 506) : préférer pwrlevels (msm8953) ----------
+if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
+  echo "=== [GPU] Adreno 506 ==="
+
+  # Gouverneur devfreq pour des transitions stables
   if [[ -f /sys/class/kgsl/kgsl-3d0/devfreq/available_governors ]]; then
     if grep -q "cpufreq" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors; then
       write /sys/class/kgsl/kgsl-3d0/devfreq/governor cpufreq
@@ -223,16 +225,11 @@ if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
     fi
   fi
 
-  # Si l'interface pwrlevel existe, on l'utilise (0 = perf max)
+  # pwrlevels: 0 = perf max ; 1 = proche du max (plus stable)
   if [[ -f /sys/class/kgsl/kgsl-3d0/min_pwrlevel && -f /sys/class/kgsl/kgsl-3d0/max_pwrlevel ]]; then
-    # garde une petite marge thermique: pwrlevel 1 (très proche du max) ; sinon 0 pour tout à fond
-    if [[ -f /sys/class/kgsl/kgsl-3d0/num_pwrlevels ]]; then
-      n=$(cat /sys/class/kgsl/kgsl-3d0/num_pwrlevels)
-      echo "[GPU] num_pwrlevels=$n"
-    fi
     write /sys/class/kgsl/kgsl-3d0/min_pwrlevel 1
     write /sys/class/kgsl/kgsl-3d0/max_pwrlevel 1
-    echo "[GPU] pwrlevel: min=max=1 (0 serait full hard max)"
+    echo "[GPU] pwrlevel min=max=1"
   else
     # fallback devfreq si pas de pwrlevel fiable
     if [[ -f /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies ]]; then
@@ -240,26 +237,22 @@ if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
       if [[ -n "$gpu_max" && "$gpu_max" -gt 0 ]]; then
         write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq $((gpu_max * 7 / 10))
         write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq $gpu_max
-        echo "[GPU] devfreq freq: min=$((gpu_max*7/10)) max=$gpu_max"
+        echo "[GPU] devfreq min=$((gpu_max*7/10)) max=$gpu_max"
       fi
     fi
   fi
 
-  # Conserver l'activation rapide pour la latence
-  [[ -f /sys/class/kgsl/kgsl-3d0/force_clk_on ]] && write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
-  [[ -f /sys/class/kgsl/kgsl-3d0/force_bus_on ]] && write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
+  [[ -f /sys/class/kgsl/kgsl-3d0/force_clk_on  ]] && write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
+  [[ -f /sys/class/kgsl/kgsl-3d0/force_bus_on  ]] && write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
   [[ -f /sys/class/kgsl/kgsl-3d0/force_rail_on ]] && write /sys/class/kgsl/kgsl-3d0/force_rail_on 1
 fi
 
-###############################################################################
-# === GPUBW : préférer bw_hwmon si présent, sinon cpufreq ===
-###############################################################################
+# ---------- GPUBW : bw_hwmon si dispo, sinon cpufreq ----------
 if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
   echo "=== [GPUBW] Bus mémoire ==="
   if [[ -f /sys/class/devfreq/soc:qcom,gpubw/available_governors ]] && \
      grep -q "bw_hwmon" /sys/class/devfreq/soc:qcom,gpubw/available_governors; then
     write /sys/class/devfreq/soc:qcom,gpubw/governor bw_hwmon
-    # tuning bw_hwmon si exposé
     [[ -f /sys/class/devfreq/soc:qcom,gpubw/io_percent ]] && write /sys/class/devfreq/soc:qcom,gpubw/io_percent 80
     [[ -f /sys/class/devfreq/soc:qcom,gpubw/sample_ms  ]] && write /sys/class/devfreq/soc:qcom,gpubw/sample_ms 4
     [[ -f /sys/class/devfreq/soc:qcom,gpubw/up_scale   ]] && write /sys/class/devfreq/soc:qcom,gpubw/up_scale 250
@@ -269,8 +262,6 @@ if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
     write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq
     echo "[GPUBW] governor=cpufreq"
   fi
-
-  # Min/Max seulement si valeurs valides
   if [[ -f /sys/class/devfreq/soc:qcom,gpubw/available_frequencies ]]; then
     bw_max=$(tr ' ' '\n' < /sys/class/devfreq/soc:qcom,gpubw/available_frequencies | sort -n | tail -1)
     if [[ -n "$bw_max" && "$bw_max" -gt 0 ]]; then
@@ -280,6 +271,71 @@ if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
     fi
   fi
 fi
+
+# ---------- VPU (VENUS) & ADSP : max perf sans casser L1 ----------
+echo "=== [VPU/DSP] VENUS+ADSP max perf (L1 friendly) ==="
+
+# Helper: fixe min/max à la fréquence max disponible (jamais 0)
+set_devfreq_to_max() {
+  local dev="$1"
+  [[ -d "$dev" ]] || return
+  echo "[VPU/DSP] Tuning $dev ..."
+  [[ -f "$dev/governor" ]] && write "$dev/governor" performance
+  local maxv=""
+  if [[ -f "$dev/available_frequencies" ]]; then
+    maxv=$(tr ' ' '\n' < "$dev/available_frequencies" | sort -n | tail -1)
+  elif [[ -f "$dev/max_freq" ]]; then
+    maxv=$(cat "$dev/max_freq" 2>/dev/null)
+  fi
+  if [[ -n "$maxv" && "$maxv" -gt 0 ]]; then
+    [[ -f "$dev/min_freq" ]] && write "$dev/min_freq" "$maxv"
+    [[ -f "$dev/max_freq" ]] && write "$dev/max_freq" "$maxv"
+    echo "[VPU/DSP] $dev -> min/max=$maxv"
+  else
+    echo "[VPU/DSP] $dev -> aucune fréquence valide, on n'écrit pas"
+  fi
+}
+
+# Appliquer aux noeuds devfreq venus/vidc/adsp connus
+for d in /sys/class/devfreq/*venus* /sys/class/devfreq/*vidc* /sys/class/devfreq/*video* /sys/class/devfreq/*adsp*; do
+  set_devfreq_to_max "$d"
+done
+
+# Certains kernels exposent aussi des bus "venus_bus_*" / "venus_ddr_*"
+for d in /sys/class/devfreq/*venus*bus* /sys/class/devfreq/*venus*ddr*; do
+  set_devfreq_to_max "$d"
+done
+
+# ---------- Augmenter les timeouts VIDC si exposés ----------
+# (évite les "detach context" lors de transitions pub/codec)
+for t in /sys/module/msm_vidc_core/parameters/timeout_ms /sys/module/msm_vidc/parameters/ssr_timeout_ms; do
+  [[ -f "$t" ]] || continue
+  write "$t" 5000   # 5s
+  echo "[VIDC] $t -> 5000"
+done
+
+# ---------- SSR : restart local (RELATED) sur venus/adsp ----------
+echo "=== [SSR] restart_level -> RELATED (venus/adsp) ==="
+for d in /sys/bus/msm_subsys/devices/*; do
+  [[ -d "$d" ]] || continue
+  nfile="$d/name"; rfile="$d/restart_level"
+  [[ -f "$nfile" && -f "$rfile" ]] || continue
+  name=$(cat "$nfile" 2>/dev/null)
+  if echo "$name" | grep -qiE 'venus|adsp'; then
+    cur=$(cat "$rfile" 2>/dev/null)
+    echo "[SSR] $name: current=$cur"
+    echo RELATED > "$rfile" 2>/dev/null && echo "[SSR] $name -> RELATED"
+  fi
+done
+echo 1 > /sys/module/subsystem_restart/parameters/enable_debug 2>/dev/null
+
+# ---------- DEBUG ciblé ----------
+echo "=== [DEBUG] VENUS/KGSL derniers événements ==="
+dmesg | grep -iE "venus|vidc|kgsl|adreno|gpu fault|detach context|sysmon_send_shutdown|Brought out of reset|OPP not found" | tail -n 120
+echo "=== [DEBUG] Fin bloc perf/stab ==="
+###############################################################################
+
+
 
 # Always return success, even if the last write fails
 exit 0
