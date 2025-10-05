@@ -8,10 +8,10 @@ BRANCH="balance"
 UINT_MAX="4294967295"
 
 # Duration in nanoseconds of one scheduling period
-SCHED_PERIOD="$((4 * 1000 * 1000))"
+SCHED_PERIOD="$((1 * 1000 * 1000))"
 
 # How many tasks should we have at a maximum in one scheduling period
-SCHED_TASKS="8"
+SCHED_TASKS="16"
 
 write() {
 	# Bail out if file does not exist
@@ -52,7 +52,7 @@ sync
 write /proc/sys/kernel/perf_cpu_time_max_percent 5
 
 # Group tasks for less stutter but less throughput
-write /proc/sys/kernel/sched_autogroup_enabled 1
+write /proc/sys/kernel/sched_autogroup_enabled 0
 
 # Execute child process before parent after fork
 write /proc/sys/kernel/sched_child_runs_first 1
@@ -70,13 +70,13 @@ write /proc/sys/kernel/sched_min_granularity_ns "$((SCHED_PERIOD / SCHED_TASKS))
 write /proc/sys/kernel/sched_wakeup_granularity_ns "$((SCHED_PERIOD / 2))"
 
 # Reduce the frequency of task migrations
-write /proc/sys/kernel/sched_migration_cost_ns 5000000
+write /proc/sys/kernel/sched_migration_cost_ns 100000
 
 # Always allow sched boosting on top-app tasks
 [[ "$ANDROID" == true ]] && write /proc/sys/kernel/sched_min_task_util_for_colocation 0
 
 # Improve real time latencies by reducing the scheduler migration time
-write /proc/sys/kernel/sched_nr_migrate 32
+write /proc/sys/kernel/sched_nr_migrate 64
 
 # Disable scheduler statistics to reduce overhead
 write /proc/sys/kernel/sched_schedstats 0
@@ -132,7 +132,7 @@ then
 	write /dev/stune/top-app/schedtune.prefer_idle 0
 
 	# Mark top-app as boosted, find high-performing CPUs
-	write /dev/stune/top-app/schedtune.boost 1
+	write /dev/stune/top-app/schedtune.boost 100
 fi
 
 # Loop over each CPU in the system
@@ -158,11 +158,11 @@ find /sys/devices/system/cpu/ -name schedutil -type d | while IFS= read -r gover
 do
 	# Consider changing frequencies once per scheduling period
 	write "$governor/up_rate_limit_us" "$((SCHED_PERIOD / 1000))"
-	write "$governor/down_rate_limit_us" "$((4 * SCHED_PERIOD / 1000))"
+	write "$governor/down_rate_limit_us" "$((2 * SCHED_PERIOD / 1000))"
 	write "$governor/rate_limit_us" "$((SCHED_PERIOD / 1000))"
 
 	# Jump to hispeed frequency at this load percentage
-	write "$governor/hispeed_load" 90
+	write "$governor/hispeed_load" 1
 	write "$governor/hispeed_freq" "$UINT_MAX"
 done
 
@@ -174,7 +174,7 @@ do
 	write "$governor/min_sample_time" "$((SCHED_PERIOD / 1000))"
 
 	# Jump to hispeed frequency at this load percentage
-	write "$governor/go_hispeed_load" 90
+	write "$governor/go_hispeed_load" 1
 	write "$governor/hispeed_freq" "$UINT_MAX"
 done
 
