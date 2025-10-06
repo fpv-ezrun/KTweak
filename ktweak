@@ -267,13 +267,13 @@ if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
   # NE PAS écrire min/max ici (pour éviter "OPP not found (-19)")
 fi
 
-###############################################################################
-# === VENUS / DSP : pas de devfreq forcing + SSR RELATED ===
-###############################################################################
-echo "=== [VPU/DSP] Stabilisation (Widevine L1 friendly) ==="
-# On NE touche PAS à /sys/class/devfreq/*venus*/*video*/*vidc*/*adsp* (laisse le driver gérer)
 
-# Appliquer restart_level=RELATED sur venus et adsp (chemin msm_subsys)
+###############################################################################
+# === VENUS / DSP : SSR RELATED + AGGRESSIVE freq tuning (L1-safe-ish) ===
+###############################################################################
+echo "=== [VPU/DSP] Stabilisation + tuning AGGRESSIF (Widevine L1 toleré) ==="
+
+# -- 1) Forcer restart_level=RELATED sur venus/adsp
 echo "=== [SSR] Mise à jour restart_level (msm_subsys) ==="
 for d in /sys/bus/msm_subsys/devices/*; do
   [[ -d "$d" ]] || continue
@@ -286,6 +286,52 @@ for d in /sys/bus/msm_subsys/devices/*; do
     echo RELATED > "$rfile" 2>/dev/null && echo "[SSR] $name: restart_level -> RELATED"
   fi
 done
+
+# -- 2) Fonction tuning agressif (palier max-1 si possible)
+tune_devfreq_aggressive() {
+  local dev="$1"
+  [[ -d "$dev" ]] || return 0
+  [[ -f "$dev/governor" ]] && write "$dev/governor" performance
+
+  if [[ -f "$dev/available_frequencies" ]]; then
+    local arr=($(tr ' ' '\n' < "$dev/available_frequencies" | awk '$1>0' | sort -n))
+    local n=${#arr[@]}
+    [[ "$n" -ge 2 ]] || { echo "[VPU] $dev: pas assez de paliers, skip"; return 0; }
+
+    # On prend le palier max-1 (le plus haut stable)
+    local target=${arr[$((n-2))]}
+    [[ -f "$dev/min_freq" ]] && write "$dev/min_freq" "$target"
+    [[ -f "$dev/max_freq" ]] && write "$dev/max_freq" "$target"
+    echo "[VPU] AGGR $dev -> min=max=$target"
+  elif [[ -f "$dev/max_freq" && -f "$dev/min_freq" ]]; then
+    local maxv=$(cat "$dev/max_freq")
+    [[ -n "$maxv" && "$maxv" -gt 0 ]] || { echo "[VPU] $dev: max_freq invalide, skip"; return 0; }
+    write "$dev/min_freq" "$maxv"
+    write "$dev/max_freq" "$maxv"
+    echo "[VPU] AGGR $dev -> min=max=$maxv"
+  else
+    echo "[VPU] $dev: aucun nœud de fréquence utilisable, skip"
+  fi
+}
+
+# -- 3) Appliquer tuning agressif sur tous les modules vidéo/DSP
+echo "=== [VPU/DSP] Tuning freq (AGGRESSIVE) ==="
+for dev in /sys/class/devfreq/*venus* /sys/class/devfreq/*vidc* /sys/class/devfreq/*video* /sys/class/devfreq/*adsp*; do
+  [[ -d "$dev" ]] || continue
+  tune_devfreq_aggressive "$dev"
+done
+
+# -- 4) Empêche la mise en veille complète du bloc VIDC si possible
+for f in /sys/kernel/debug/msm_vidc/*/disable_pc /sys/kernel/debug/msm_vidc/disable_pc; do
+  [[ -f "$f" ]] && write "$f" 1 && echo "[VPU] disable_pc activé sur $f"
+done
+
+# -- 5) Diagnostic court pour vérifier état
+echo "=== [VPU DEBUG] États venus/adsp récents ==="
+dmesg | grep -iE "venus|vidc|sysmon_send_shutdown|Brought out of reset|zap|mdt|b0[234]" | tail -n 80
+
+
+
 
 # Rendre le SSR plus verbeux (debug)
 echo 1 > /sys/module/subsystem_restart/parameters/enable_debug 2>/dev/null
