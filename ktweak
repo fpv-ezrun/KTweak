@@ -200,10 +200,10 @@ do
 	write "$queue/iostats" 0
 
 	# Reduce heuristic read-ahead in exchange for I/O latency
-	write "$queue/read_ahead_kb" 32
+	write "$queue/read_ahead_kb" 512
 
 	# Reduce the maximum number of I/O requests in exchange for latency
-	write "$queue/nr_requests" 16
+	write "$queue/nr_requests" 256
 done
 
 
@@ -226,17 +226,17 @@ if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
 
   # Priorité : pwrlevels (0 = perf max). Garde 1 pour petite marge thermique.
   if [[ -f /sys/class/kgsl/kgsl-3d0/min_pwrlevel && -f /sys/class/kgsl/kgsl-3d0/max_pwrlevel ]]; then
-    write /sys/class/kgsl/kgsl-3d0/min_pwrlevel 1
-    write /sys/class/kgsl/kgsl-3d0/max_pwrlevel 1
-    echo "[GPU] pwrlevel min=max=1"
+    write /sys/class/kgsl/kgsl-3d0/min_pwrlevel 0
+    write /sys/class/kgsl/kgsl-3d0/max_pwrlevel 0
+    echo "[GPU] pwrlevel min=max=0"
   else
     # Fallback devfreq si pas de pwrlevels utilisables
     if [[ -f /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies ]]; then
       gpu_max=$(tr ' ' '\n' < /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies | sort -n | tail -1)
       if [[ -n "$gpu_max" && "$gpu_max" -gt 0 ]]; then
-        write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq $((gpu_max * 7 / 10))
+        write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq $((gpu_max * 10 / 10))
         write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq $gpu_max
-        echo "[GPU] devfreq freq: min=$((gpu_max*7/10)) max=$gpu_max"
+        echo "[GPU] devfreq freq: min=$((gpu_max*10/10)) max=$gpu_max"
       fi
     fi
   fi
@@ -256,9 +256,9 @@ if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
      grep -q "bw_hwmon" /sys/class/devfreq/soc:qcom,gpubw/available_governors; then
     write /sys/class/devfreq/soc:qcom,gpubw/governor bw_hwmon || true
     # petits réglages si exposés
-    [[ -f /sys/class/devfreq/soc:qcom,gpubw/io_percent ]] && write /sys/class/devfreq/soc:qcom,gpubw/io_percent 80
-    [[ -f /sys/class/devfreq/soc:qcom,gpubw/sample_ms  ]] && write /sys/class/devfreq/soc:qcom,gpubw/sample_ms 4
-    [[ -f /sys/class/devfreq/soc:qcom,gpubw/up_scale   ]] && write /sys/class/devfreq/soc:qcom,gpubw/up_scale 250
+    [[ -f /sys/class/devfreq/soc:qcom,gpubw/io_percent ]] && write /sys/class/devfreq/soc:qcom,gpubw/io_percent 100
+    [[ -f /sys/class/devfreq/soc:qcom,gpubw/sample_ms  ]] && write /sys/class/devfreq/soc:qcom,gpubw/sample_ms 2
+    [[ -f /sys/class/devfreq/soc:qcom,gpubw/up_scale   ]] && write /sys/class/devfreq/soc:qcom,gpubw/up_scale 500
     echo "[GPUBW] governor=bw_hwmon (tuned)"
   else
     write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq || true
