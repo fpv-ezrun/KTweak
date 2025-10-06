@@ -294,25 +294,29 @@ tune_devfreq_aggressive() {
   [ -f "$dev/governor" ] && write "$dev/governor" performance
 
   if [ -f "$dev/available_frequencies" ]; then
-    # On liste proprement sans tableau pour compat Android shell
+    # Extraction sans tableau (compat Android shell)
     freqs=$(tr ' ' '\n' < "$dev/available_frequencies" | awk '$1>0' | sort -n)
     count=$(echo "$freqs" | wc -l)
     if [ "$count" -lt 2 ]; then
       echo "[VPU] $dev: pas assez de paliers, skip"
       return 0
     fi
-    target=$(echo "$freqs" | tail -n 2 | head -n 1)  # max-1
+
+    # Choisir le palier max-1
+    target=$(echo "$freqs" | tail -n 2 | head -n 1)
     [ -f "$dev/min_freq" ] && write "$dev/min_freq" "$target"
     [ -f "$dev/max_freq" ] && write "$dev/max_freq" "$target"
     echo "[VPU] AGGR $dev -> min=max=$target"
+
   elif [ -f "$dev/max_freq" ] && [ -f "$dev/min_freq" ]; then
-    maxv=$(cat "$dev/max_freq")
-    if [ -n "$maxv" ] && [ "$maxv" -gt 0 ]; then
+    maxv=$(cat "$dev/max_freq" | grep -Eo '[0-9]+')
+    if [ ! -z "$maxv" ]; then
+      expr "$maxv" + 1 >/dev/null 2>&1 || { echo "[VPU] $dev: max_freq invalide ($maxv)"; return 0; }
       write "$dev/min_freq" "$maxv"
       write "$dev/max_freq" "$maxv"
       echo "[VPU] AGGR $dev -> min=max=$maxv"
     else
-      echo "[VPU] $dev: max_freq invalide, skip"
+      echo "[VPU] $dev: max_freq vide, skip"
     fi
   else
     echo "[VPU] $dev: aucun nœud de fréquence utilisable, skip"
