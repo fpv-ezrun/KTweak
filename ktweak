@@ -400,7 +400,9 @@ setprop persist.vendor.audio.fluence.voicerec false
 
 # 4) Garder Dolby chargé mais réduire les risques d’overdrive (option doux)
 #    -> si ça continue de rebooter au volume max, décommente la ligne bypass.
-# setprop persist.vendor.dolby.dap.bypass 1   # Bypass DAP, garde le service, baisse la charge DSP
+setprop persist.vendor.dolby.dap.bypass 1   # Bypass DAP, garde le service, baisse la charge DSP
+setprop vendor.audio_hal.period_size 192
+setprop vendor.audio.adm.buffering.ms 12
 
 # 5) Donner la priorité CPU aux services audio/codecs (latence ↓)
 for p in audioserver media.codec media.swcodec mediaserver; do
@@ -417,6 +419,8 @@ getprop vendor.audio.offload.codec.ac3
 getprop vendor.audio.offload.codec.eac3
 getprop aaudio.mmap_policy
 getprop persist.vendor.dolby.dap.bypass
+getprop vendor.audio_hal.period_size
+getprop vendor.audio.adm.buffering.ms
 echo "=== [AUDIO DEBUG] Derniers logs ADSP/audio ==="
 dmesg | grep -iE "adsp|audio|q6|apr|fatal|reset" | tail -n 80
 
