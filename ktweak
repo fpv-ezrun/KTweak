@@ -352,6 +352,66 @@ echo 1 > /sys/module/subsystem_restart/parameters/enable_debug 2>/dev/null
 setprop debug.media.omx.disable.vp9 true
 setprop debug.media.omx.disable.hevc true
 
+
+
+
+###############################################################################
+# === AUDIO / ADSP STABILISATION (Dolby actif, L1 préservé) ===
+# But : éviter les resets ADSP lors des changements de codec/volume élevés
+#       -> on désactive l'audio "compress offload" (DSP) et MMAP
+#       -> on garde la vidéo Widevine L1 (pipeline vidéo inchangé)
+###############################################################################
+echo "=== [AUDIO] Stabilisation ADSP / Dolby ==="
+
+# 1) Désactiver l'audio offload (fait décoder l'audio côté CPU en PCM)
+setprop vendor.audio.offload.disable 1
+setprop audio.offload.disable 1
+setprop vendor.audio.offload.passthrough 0
+setprop vendor.audio.offload.multiple.enabled 0
+setprop vendor.audio.offload.track.enable 0
+setprop vendor.audio.offload.gapless.enabled 0
+
+# Désactiver offload pour codecs sensibles (AC3/EAC3/AAC change souvent sur pubs)
+setprop vendor.audio.offload.codec.ac3 false
+setprop vendor.audio.offload.codec.eac3 false
+setprop vendor.audio.offload.codec.aac false
+
+# 2) Éviter AAudio/MMAP (souvent instable sur anciens SoC)
+setprop aaudio.mmap_policy 2                 # 2 = NEVER
+setprop aaudio.mmap_exclusive_policy 2
+
+# 3) Forcer le chemin PCM "classique" (moins d'effets, plus stable)
+setprop persist.vendor.audio.fluence.speaker false
+setprop persist.vendor.audio.fluence.voicecall false
+setprop persist.vendor.audio.fluence.voicerec false
+
+# 4) Garder Dolby chargé mais réduire les risques d’overdrive (option doux)
+#    -> si ça continue de rebooter au volume max, décommente la ligne bypass.
+# setprop persist.vendor.dolby.dap.bypass 1   # Bypass DAP, garde le service, baisse la charge DSP
+
+# 5) Donner la priorité CPU aux services audio/codecs (latence ↓)
+for p in audioserver media.codec media.swcodec mediaserver; do
+  for pid in $(pidof "$p" 2>/dev/null); do
+    echo "$pid" > /dev/stune/top-app/tasks 2>/dev/null
+  done
+done
+
+# 6) Snapshot debug utile après réglages
+echo "=== [AUDIO DEBUG] Props clés ==="
+getprop vendor.audio.offload.disable
+getprop audio.offload.disable
+getprop vendor.audio.offload.codec.ac3
+getprop vendor.audio.offload.codec.eac3
+getprop aaudio.mmap_policy
+getprop persist.vendor.dolby.dap.bypass
+echo "=== [AUDIO DEBUG] Derniers logs ADSP/audio ==="
+dmesg | grep -iE "adsp|audio|q6|apr|fatal|reset" | tail -n 80
+
+
+
+
+
+
 ###############################################################################
 # DEBUG court
 echo "=== [DEBUG] Derniers VENUS/KGSL ==="
