@@ -377,7 +377,21 @@ echo 1 > /sys/module/subsystem_restart/parameters/enable_debug 2>/dev/null
 setprop debug.media.omx.disable.vp9 true
 setprop debug.media.omx.disable.hevc true
 
+# --- VPU durability tweaks ---
+# 1) Désactiver UBWC (souvent source de reset sur msm8953 lors des changements de flux)
+setprop vendor.video.disable.ubwc 1
 
+# 2) Quand un device devfreq *venus*/*video* n'a pas assez de paliers, ne pas tenter min/max
+for d in /sys/class/devfreq/*venus* /sys/class/devfreq/*vidc* /sys/class/devfreq/*video*; do
+  [ -d "$d" ] || continue
+  if [ -f "$d/available_frequencies" ]; then
+    cnt=$(tr ' ' '\n' < "$d/available_frequencies" | awk '$1>0' | wc -l)
+    if [ "$cnt" -lt 2 ] && [ -f "$d/governor" ]; then
+      write "$d/governor" performance
+      echo "[VPU] $d -> governor=performance (single-step devfreq)"
+    fi
+  fi
+done
 
 
 
@@ -428,6 +442,13 @@ setprop persist.vendor.audio.fluence.voicerec false
 setprop persist.vendor.dolby.dap.bypass 1   # Bypass DAP, garde le service, baisse la charge DSP
 setprop vendor.audio_hal.period_size 192
 setprop vendor.audio.adm.buffering.ms 12
+
+# === AUDIO FX/Dolby hardening ===
+
+# Ignorer la chaîne d'effets Android (évite conflits VINTF / librairies manquantes)
+setprop ro.audio.ignore_effects true
+setprop vendor.audio.disable_effects true
+
 
 # 5) Donner la priorité CPU aux services audio/codecs (latence ↓)
 for p in audioserver media.codec media.swcodec mediaserver; do
