@@ -355,6 +355,19 @@ setprop debug.media.omx.disable.hevc true
 
 
 
+
+
+
+
+
+
+###############################################################################
+# DEBUG court
+echo "=== [DEBUG] Derniers VENUS/KGSL ==="
+dmesg | grep -iE "venus|vidc|kgsl|adreno|detach context|sysmon_send_shutdown|Brought out of reset|OPP not found" | tail -n 120
+echo "=== [DEBUG] Fin bloc perf/stab ==="
+
+
 ###############################################################################
 # === AUDIO / ADSP STABILISATION (Dolby actif, L1 préservé) ===
 # But : éviter les resets ADSP lors des changements de codec/volume élevés
@@ -406,17 +419,6 @@ getprop aaudio.mmap_policy
 getprop persist.vendor.dolby.dap.bypass
 echo "=== [AUDIO DEBUG] Derniers logs ADSP/audio ==="
 dmesg | grep -iE "adsp|audio|q6|apr|fatal|reset" | tail -n 80
-
-
-
-
-
-
-###############################################################################
-# DEBUG court
-echo "=== [DEBUG] Derniers VENUS/KGSL ==="
-dmesg | grep -iE "venus|vidc|kgsl|adreno|detach context|sysmon_send_shutdown|Brought out of reset|OPP not found" | tail -n 120
-echo "=== [DEBUG] Fin bloc perf/stab ==="
 
 
 # Always return success, even if the last write fails
