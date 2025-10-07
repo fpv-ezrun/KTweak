@@ -207,65 +207,90 @@ do
 done
 
 
-###############################################################################
-# === GPU Adreno 506 : pwrlevels (msm8953) + GPUBW sans min/max ===
-###############################################################################
-if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
-  echo "=== [GPU] Adreno 506 : pwrlevel ==="
 
-  # Gouverneur devfreq stable
-  if [[ -f /sys/class/kgsl/kgsl-3d0/devfreq/available_governors ]]; then
-    if grep -q "cpufreq" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors; then
-      write /sys/class/kgsl/kgsl-3d0/devfreq/governor cpufreq
-      echo "[GPU] governor=cpufreq"
+
+
+
+###############################################################################
+# === GPU Adreno 506 : gouverneur SIMPLE_ONDEMAND agressif + GPUBW boosté ===
+###############################################################################
+if [ -d /sys/class/kgsl/kgsl-3d0 ]; then
+  echo "=== [GPU] Adreno 506 : mode SIMPLE_ONDEMAND BOOST ==="
+
+  # Gouverneur préféré : simple_ondemand
+  if [ -f /sys/class/kgsl/kgsl-3d0/devfreq/available_governors ]; then
+    if grep -q "simple_ondemand" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors; then
+      write /sys/class/kgsl/kgsl-3d0/devfreq/governor simple_ondemand
+      echo "[GPU] governor=simple_ondemand"
+    elif grep -q "ondemand" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors; then
+      write /sys/class/kgsl/kgsl-3d0/devfreq/governor ondemand
+      echo "[GPU] governor=ondemand"
     elif grep -q "msm-adreno-tz" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors; then
       write /sys/class/kgsl/kgsl-3d0/devfreq/governor msm-adreno-tz
-      echo "[GPU] governor=msm-adreno-tz"
+      echo "[GPU] governor=msm-adreno-tz (fallback)"
+    else
+      write /sys/class/kgsl/kgsl-3d0/devfreq/governor performance
+      echo "[GPU] governor=performance (fallback)"
     fi
   fi
 
-  # Priorité : pwrlevels (0 = perf max). Garde 1 pour petite marge thermique.
-  if [[ -f /sys/class/kgsl/kgsl-3d0/min_pwrlevel && -f /sys/class/kgsl/kgsl-3d0/max_pwrlevel ]]; then
-    write /sys/class/kgsl/kgsl-3d0/min_pwrlevel 0
-    write /sys/class/kgsl/kgsl-3d0/max_pwrlevel 0
-    echo "[GPU] pwrlevel min=max=0"
-  else
-    # Fallback devfreq si pas de pwrlevels utilisables
-    if [[ -f /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies ]]; then
-      gpu_max=$(tr ' ' '\n' < /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies | sort -n | tail -1)
-      if [[ -n "$gpu_max" && "$gpu_max" -gt 0 ]]; then
-        write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq $((gpu_max * 10 / 10))
-        write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq $gpu_max
-        echo "[GPU] devfreq freq: min=$((gpu_max*10/10)) max=$gpu_max"
-      fi
+  # Lecture des fréquences disponibles
+  if [ -f /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies ]; then
+    gpu_freqs=$(tr ' ' '\n' < /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies | awk '$1>0' | sort -n)
+    gpu_max=$(echo "$gpu_freqs" | tail -n 1)
+    gpu_mid=$(echo "$gpu_freqs" | tail -n 2 | head -n 1)
+
+    # Fixe min au palier max-1 et max au palier max
+    [ -n "$gpu_mid" ] && write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq "$gpu_mid"
+    [ -n "$gpu_max" ] && write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq "$gpu_max"
+
+    echo "[GPU] freqs: min=$gpu_mid max=$gpu_max"
+  fi
+
+  # Paramètres internes du gouverneur simple_ondemand si exposés
+  for f in /sys/class/kgsl/kgsl-3d0/devfreq/simple_ondemand/*; do
+    case "$(basename "$f")" in
+      up_threshold)        write "$f" 45 ;;    # boost plus vite
+      down_differential)   write "$f" 10 ;;
+      sampling_rate)       write "$f" 10000 ;; # µs
+      io_is_busy)          write "$f" 1 ;;
+      sampling_down_factor) write "$f" 1 ;;
+      *) : ;;
+    esac
+  done
+
+  # Force la mise sous tension complète du bloc GPU
+  [ -f /sys/class/kgsl/kgsl-3d0/force_clk_on ] && write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
+  [ -f /sys/class/kgsl/kgsl-3d0/force_bus_on ] && write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
+  [ -f /sys/class/kgsl/kgsl-3d0/force_rail_on ] && write /sys/class/kgsl/kgsl-3d0/force_rail_on 1
+fi
+
+###############################################################################
+# === GPUBW : mode PERFORMANCE + tuning agressif ===
+###############################################################################
+if [ -d /sys/class/devfreq/soc:qcom,gpubw ]; then
+  echo "=== [GPUBW] Bus mémoire GPU ==="
+
+  # Gouverneur performance si dispo
+  if [ -f /sys/class/devfreq/soc:qcom,gpubw/available_governors ]; then
+    if grep -q "performance" /sys/class/devfreq/soc:qcom,gpubw/available_governors; then
+      write /sys/class/devfreq/soc:qcom,gpubw/governor performance
+      echo "[GPUBW] governor=performance"
+    else
+      write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq
+      echo "[GPUBW] governor=cpufreq (fallback)"
     fi
   fi
 
-  # Activation rapide (latence)
-  [[ -f /sys/class/kgsl/kgsl-3d0/force_clk_on ]] && write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
-  [[ -f /sys/class/kgsl/kgsl-3d0/force_bus_on ]] && write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
-  [[ -f /sys/class/kgsl/kgsl-3d0/force_rail_on ]] && write /sys/class/kgsl/kgsl-3d0/force_rail_on 1
+  # Boost complet sur la bande passante GPU
+  if [ -f /sys/class/devfreq/soc:qcom,gpubw/max_freq ]; then
+    gpubw_max=$(cat /sys/class/devfreq/soc:qcom,gpubw/max_freq | grep -Eo '[0-9]+')
+    [ -n "$gpubw_max" ] && write /sys/class/devfreq/soc:qcom,gpubw/min_freq "$gpubw_max"
+    echo "[GPUBW] freq min=max=$gpubw_max"
+  fi
 fi
 
-###############################################################################
-# === GPUBW : gouverneur seulement (évite OPP -19) ===
-###############################################################################
-if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
-  echo "=== [GPUBW] Bus mémoire ==="
-  if [[ -f /sys/class/devfreq/soc:qcom,gpubw/available_governors ]] && \
-     grep -q "bw_hwmon" /sys/class/devfreq/soc:qcom,gpubw/available_governors; then
-    write /sys/class/devfreq/soc:qcom,gpubw/governor bw_hwmon || true
-    # petits réglages si exposés
-    [[ -f /sys/class/devfreq/soc:qcom,gpubw/io_percent ]] && write /sys/class/devfreq/soc:qcom,gpubw/io_percent 100
-    [[ -f /sys/class/devfreq/soc:qcom,gpubw/sample_ms  ]] && write /sys/class/devfreq/soc:qcom,gpubw/sample_ms 2
-    [[ -f /sys/class/devfreq/soc:qcom,gpubw/up_scale   ]] && write /sys/class/devfreq/soc:qcom,gpubw/up_scale 500
-    echo "[GPUBW] governor=bw_hwmon (tuned)"
-  else
-    write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq || true
-    echo "[GPUBW] governor=cpufreq"
-  fi
-  # NE PAS écrire min/max ici (pour éviter "OPP not found (-19)")
-fi
+
 
 
 ###############################################################################
