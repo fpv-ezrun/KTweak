@@ -209,6 +209,113 @@ done
 
 
 
+###############################################################################
+# === CPU ULTRA BOOST (msm8953) ===
+###############################################################################
+
+echo "=== [CPU] ULTRA BOOST ==="
+
+# A) cpuset: donne tous les CPUs au top-app/foreground
+if [ -d /dev/cpuset ]; then
+  for grp in top-app foreground; do
+    [ -f /dev/cpuset/$grp/cpus ] && echo 0-7 > /dev/cpuset/$grp/cpus 2>/dev/null
+    [ -f /dev/cpuset/$grp/schedtune.boost ] && echo 100 > /dev/cpuset/$grp/schedtune.boost 2>/dev/null
+  done
+  [ -f /dev/cpuset/background/cpus ] && echo 0-3 > /dev/cpuset/background/cpus 2>/dev/null
+fi
+
+# B) schedtune + uclamp (Android 11+)
+for grp in top-app foreground; do
+  if [ -d /dev/stune/$grp ]; then
+    [ -f /dev/stune/$grp/schedtune.boost ] && echo 100 > /dev/stune/$grp/schedtune.boost
+    [ -f /dev/stune/$grp/schedtune.prefer_idle ] && echo 0 > /dev/stune/$grp/schedtune.prefer_idle
+    # uclamp.min à 80% si exposé
+    [ -f /dev/stune/$grp/uclamp.min ] && echo 819 > /dev/stune/$grp/uclamp.min 2>/dev/null
+    [ -f /dev/stune/$grp/uclamp.max ] && echo 1024 > /dev/stune/$grp/uclamp.max 2>/dev/null
+  fi
+done
+
+# C) input boost (instantané à l'interaction)
+if [ -d /sys/module/cpu_boost/parameters ]; then
+  # format: "cpu:freq cpu:freq ..."
+  max_any=""
+  for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$pol" ] || continue
+    mx=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null | grep -Eo '[0-9]+')
+    [ -n "$mx" ] && max_any="$mx"
+  done
+  if [ -n "$max_any" ]; then
+    echo "0:$max_any 1:$max_any 2:$max_any 3:$max_any 4:$max_any 5:$max_any 6:$max_any 7:$max_any" \
+      > /sys/module/cpu_boost/parameters/input_boost_freq 2>/dev/null
+    echo 150 > /sys/module/cpu_boost/parameters/input_boost_ms 2>/dev/null
+  fi
+fi
+
+# D) Gouverneur + min/max par policy (min = max-1)
+for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+  [ -d "$pol" ] || continue
+
+  # governor
+  if [ -f "$pol/scaling_available_governors" ]; then
+    if grep -q schedutil "$pol/scaling_available_governors"; then
+      write "$pol/scaling_governor" schedutil
+    elif grep -q interactive "$pol/scaling_available_governors"; then
+      write "$pol/scaling_governor" interactive
+    fi
+  fi
+
+  # min/max -> max-1 / max
+  if [ -f "$pol/scaling_available_frequencies" ]; then
+    freq_list=$(tr ' ' '\n' < "$pol/scaling_available_frequencies" | awk '$1>0' | sort -n)
+    fmax=$(echo "$freq_list" | tail -n1)
+    fmid=$(echo "$freq_list" | tail -n2 | head -n1)
+    [ -n "$fmid" ] && write "$pol/scaling_min_freq" "$fmid"
+    [ -n "$fmax" ] && write "$pol/scaling_max_freq" "$fmax"
+  else
+    # fallback au cpuinfo si pas de liste
+    fmax=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null | grep -Eo '[0-9]+')
+    if [ -n "$fmax" ] && [ -f "$pol/scaling_min_freq" ] && [ -f "$pol/scaling_max_freq" ]; then
+      write "$pol/scaling_max_freq" "$fmax"
+      # met 90% du max en min
+      fmin=$(( fmax * 9 / 10 ))
+      write "$pol/scaling_min_freq" "$fmin"
+    fi
+  fi
+
+  # schedutil knobs
+  if [ -d "$pol/schedutil" ]; then
+    write "$pol/schedutil/up_rate_limit_us"  1000   # 1 ms
+    write "$pol/schedutil/down_rate_limit_us" 4000  # 4 ms
+    # certains kernels exposent hispeed_* pour schedutil
+    [ -f "$pol/schedutil/hispeed_load" ] && write "$pol/schedutil/hispeed_load" 60
+    [ -f "$pol/schedutil/hispeed_freq" ] && write "$pol/schedutil/hispeed_freq" 0
+  fi
+
+  # interactive (si fallback)
+  if [ -d "$pol/interactive" ]; then
+    write "$pol/interactive/timer_rate"  10000
+    write "$pol/interactive/min_sample_time" 10000
+    write "$pol/interactive/go_hispeed_load" 50
+    write "$pol/interactive/hispeed_freq" 0
+  fi
+done
+
+# E) I/O queue: réduire latence
+for q in /sys/block/*/queue; do
+  [ -d "$q" ] || continue
+  [ -f "$q/rotational" ] && write "$q/rotational" 0
+  [ -f "$q/rq_affinity" ] && write "$q/rq_affinity" 2
+  [ -f "$q/nomerges" ] && write "$q/nomerges" 2
+done
+
+
+
+
+
+
+
+
+
 
 
 ###############################################################################
