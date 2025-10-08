@@ -50,8 +50,6 @@ echo "Branch: $BRANCH"
 # Sync to data in the rare case a device crashes
 sync
 
-
-
 ###############################################################################
 # === CPU BIOSHOCK MAX PERFORMANCE (msm8953 / no fallback) ===
 ###############################################################################
