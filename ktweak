@@ -54,6 +54,10 @@ sync
 # === CPU BIOSHOCK MAX PERFORMANCE (msm8953 / no fallback) ===
 ###############################################################################
 
+for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+  [ -d "$pol" ] || continue
+  echo "--- $(basename "$pol") ---"
+
   # Debug: liste des governors exposés
   if [ -f "$pol/scaling_available_governors" ]; then
     echo "[DBG] available_governors: $(cat "$pol/scaling_available_governors" 2>/dev/null)"
