@@ -54,6 +54,15 @@ sync
 # === CPU BIOSHOCK MAX PERFORMANCE (msm8953 / no fallback) ===
 ###############################################################################
 
+  # Debug: liste des governors exposés
+  if [ -f "$pol/scaling_available_governors" ]; then
+    echo "[DBG] available_governors: $(cat "$pol/scaling_available_governors" 2>/dev/null)"
+  else
+    echo "[DBG] no scaling_available_governors"
+  fi
+  cur_before="$(cat "$pol/scaling_governor" 2>/dev/null)"
+  echo "[DBG] current governor before: $cur_before"
+
 echo "=== [CPU] BIOSHOCK governor tuning ==="
 
 # Paramètres globaux du scheduler / VM
