@@ -207,7 +207,39 @@ do
 done
 
 
+###############################################################################
+# === LISTE DES GOUVERNEURS CPU DISPONIBLES (debug) ===
+###############################################################################
+echo "=== [CPU DEBUG] Gouverneurs disponibles ==="
 
+for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+  [ -d "$pol" ] || continue
+
+  cpu_name=$(basename "$pol")
+  gov_file="$pol/scaling_available_governors"
+  cur_file="$pol/scaling_governor"
+
+  echo ""
+  echo "────────────────────────────────────────────"
+  echo "→ $cpu_name"
+  echo "────────────────────────────────────────────"
+
+  if [ -f "$gov_file" ]; then
+    avail=$(cat "$gov_file" 2>/dev/null)
+    echo "[LIST] $avail"
+    dmesg -n 1 && echo "[KMSG] [$cpu_name] governors: $avail" > /dev/kmsg 2>/dev/null
+  else
+    echo "[WARN] Aucun fichier scaling_available_governors trouvé"
+  fi
+
+  if [ -f "$cur_file" ]; then
+    cur=$(cat "$cur_file" 2>/dev/null)
+    echo "[ACTUEL] $cur"
+  fi
+done
+
+echo ""
+echo "=== [CPU DEBUG] Fin de la liste des gouverneurs ==="
 
 
 
