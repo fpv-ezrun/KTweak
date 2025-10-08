@@ -50,199 +50,70 @@ echo "Branch: $BRANCH"
 # Sync to data in the rare case a device crashes
 sync
 
-# Limit max perf event processing time to this much CPU usage
+###############################################################################
+# === CPU BIOSHOCK MAX BOOST (msm8953) ===
+###############################################################################
+
+echo "=== [CPU] BIOSHOCK MAX BOOST ==="
+
+# 0) Paramètres scheduler/vm agressifs mais sûrs
 write /proc/sys/kernel/perf_cpu_time_max_percent 0
-
-# Group tasks for less stutter but less throughput
 write /proc/sys/kernel/sched_autogroup_enabled 0
-
-# Execute child process before parent after fork
 write /proc/sys/kernel/sched_child_runs_first 1
-
-# Preliminary requirement for the following values
 write /proc/sys/kernel/sched_tunable_scaling 0
 
-# Reduce the maximum scheduling period for lower latency
-write /proc/sys/kernel/sched_latency_ns "$SCHED_PERIOD"
-
-# Schedule this ratio of tasks in the guarenteed sched period
-write /proc/sys/kernel/sched_min_granularity_ns "$((SCHED_PERIOD / SCHED_TASKS))"
-
-# Require preeptive tasks to surpass half of a sched period in vmruntime
+# Latences très basses
+write /proc/sys/kernel/sched_latency_ns            "$SCHED_PERIOD"
+write /proc/sys/kernel/sched_min_granularity_ns    "$((SCHED_PERIOD / SCHED_TASKS))"
 write /proc/sys/kernel/sched_wakeup_granularity_ns "$((SCHED_PERIOD / 2))"
+write /proc/sys/kernel/sched_migration_cost_ns     50000
+write /proc/sys/kernel/sched_nr_migrate            64
+write /proc/sys/kernel/sched_schedstats            0
+write /proc/sys/kernel/printk_devkmsg              off
 
-# Reduce the frequency of task migrations
-write /proc/sys/kernel/sched_migration_cost_ns 50000
-
-# Always allow sched boosting on top-app tasks
-[[ "$ANDROID" == true ]] && write /proc/sys/kernel/sched_min_task_util_for_colocation 0
-
-# Improve real time latencies by reducing the scheduler migration time
-write /proc/sys/kernel/sched_nr_migrate 64
-
-# Disable scheduler statistics to reduce overhead
-write /proc/sys/kernel/sched_schedstats 0
-
-# Disable unnecessary printk logging
-write /proc/sys/kernel/printk_devkmsg off
-
-# Start non-blocking writeback later
-write /proc/sys/vm/dirty_background_ratio 10
-
-# Start blocking writeback later
-write /proc/sys/vm/dirty_ratio 30
-
-# Require dirty memory to stay in memory for longer
-write /proc/sys/vm/dirty_expire_centisecs 3000
-
-# Run the dirty memory flusher threads less often
+# VM/I-O
+write /proc/sys/vm/dirty_background_ratio   10
+write /proc/sys/vm/dirty_ratio              30
+write /proc/sys/vm/dirty_expire_centisecs   3000
 write /proc/sys/vm/dirty_writeback_centisecs 3000
+write /proc/sys/vm/page-cluster             0
+write /proc/sys/vm/stat_interval            10
+write /proc/sys/vm/swappiness               100
+write /proc/sys/vm/vfs_cache_pressure       400
 
-# Disable read-ahead for swap devices
-write /proc/sys/vm/page-cluster 0
+# Réglages réseau utiles au streaming
+write /proc/sys/net/ipv4/tcp_ecn         1
+write /proc/sys/net/ipv4/tcp_fastopen    3
+write /proc/sys/net/ipv4/tcp_syncookies  0
 
-# Update /proc/stat less often to reduce jitter
-write /proc/sys/vm/stat_interval 10
-
-# Swap to the swap device at a fair rate
-write /proc/sys/vm/swappiness 100
-
-# Fairly prioritize page cache and file structures
-write /proc/sys/vm/vfs_cache_pressure 400
-
-# Enable Explicit Congestion Control
-write /proc/sys/net/ipv4/tcp_ecn 1
-
-# Enable fast socket open for receiver and sender
-write /proc/sys/net/ipv4/tcp_fastopen 3
-
-# Disable SYN cookies
-write /proc/sys/net/ipv4/tcp_syncookies 0
-
-if [[ -f "/sys/kernel/debug/sched_features" ]]
-then
-	# Consider scheduling tasks that are eager to run
-	write /sys/kernel/debug/sched_features NEXT_BUDDY
-
-	# Schedule tasks on their origin CPU if possible
-	write /sys/kernel/debug/sched_features TTWU_QUEUE
+# sched_features (si dispo)
+if [ -f /sys/kernel/debug/sched_features ]; then
+  write /sys/kernel/debug/sched_features NEXT_BUDDY
+  write /sys/kernel/debug/sched_features TTWU_QUEUE
 fi
 
-[[ "$ANDROID" == true ]] && if [[ -d "/dev/stune/" ]]
-then
-	# We are not concerned with prioritizing latency
-	write /dev/stune/top-app/schedtune.prefer_idle 0
-
-	# Mark top-app as boosted, find high-performing CPUs
-	write /dev/stune/top-app/schedtune.boost 100
-fi
-
-# Loop over each CPU in the system
-for cpu in /sys/devices/system/cpu/cpu*/cpufreq
-do
-	# Fetch the available governors from the CPU
-	avail_govs="$(cat "$cpu/scaling_available_governors")"
-
-	# Attempt to set the governor in this order
-	for governor in schedutil interactive
-	do
-		# Once a matching governor is found, set it and break for this CPU
-		if [[ "$avail_govs" == *"$governor"* ]]
-		then
-			write "$cpu/scaling_governor" "$governor"
-			break
-		fi
-	done
-done
-
-# Apply governor specific tunables for schedutil
-find /sys/devices/system/cpu/ -name schedutil -type d | while IFS= read -r governor
-do
-	# Consider changing frequencies once per scheduling period
-	write "$governor/up_rate_limit_us" "$((SCHED_PERIOD / 1000))"
-	write "$governor/down_rate_limit_us" "$((2 * SCHED_PERIOD / 1000))"
-	write "$governor/rate_limit_us" "$((SCHED_PERIOD / 1000))"
-
-	# Jump to hispeed frequency at this load percentage
-	write "$governor/hispeed_load" 1
-	write "$governor/hispeed_freq" "$UINT_MAX"
-done
-
-# Apply governor specific tunables for interactive
-find /sys/devices/system/cpu/ -name interactive -type d | while IFS= read -r governor
-do
-	# Consider changing frequencies once per scheduling period
-	write "$governor/timer_rate" "$((SCHED_PERIOD / 1000))"
-	write "$governor/min_sample_time" "$((SCHED_PERIOD / 1000))"
-
-	# Jump to hispeed frequency at this load percentage
-	write "$governor/go_hispeed_load" 1
-	write "$governor/hispeed_freq" "$UINT_MAX"
-done
-
-for queue in /sys/block/*/queue
-do
-	# Choose the first governor available
-	avail_scheds="$(cat "$queue/scheduler")"
-	for sched in cfq noop kyber bfq mq-deadline none
-	do
-		if [[ "$avail_scheds" == *"$sched"* ]]
-		then
-			write "$queue/scheduler" "$sched"
-			break
-		fi
-	done
-
-	# Do not use I/O as a source of randomness
-	write "$queue/add_random" 0
-
-	# Disable I/O statistics accounting
-	write "$queue/iostats" 0
-
-	# Reduce heuristic read-ahead in exchange for I/O latency
-	write "$queue/read_ahead_kb" 512
-
-	# Reduce the maximum number of I/O requests in exchange for latency
-	write "$queue/nr_requests" 256
-done
-
-
-
-
-###############################################################################
-# === CPU ULTRA BOOST (msm8953) ===
-###############################################################################
-
-echo "=== [CPU] ULTRA BOOST ==="
-
-# A) cpuset: donne tous les CPUs au top-app/foreground
+# 1) stune/cpuset/uclamp : mettre l’app en tête
 if [ -d /dev/cpuset ]; then
-  for grp in top-app foreground; do
-    [ -f /dev/cpuset/$grp/cpus ] && echo 0-7 > /dev/cpuset/$grp/cpus 2>/dev/null
-    [ -f /dev/cpuset/$grp/schedtune.boost ] && echo 100 > /dev/cpuset/$grp/schedtune.boost 2>/dev/null
+  for g in top-app foreground; do
+    [ -f /dev/cpuset/$g/cpus ] && echo 0-7 > /dev/cpuset/$g/cpus 2>/dev/null
   done
-  [ -f /dev/cpuset/background/cpus ] && echo 0-3 > /dev/cpuset/background/cpus 2>/dev/null
 fi
-
-# B) schedtune + uclamp (Android 11+)
-for grp in top-app foreground; do
-  if [ -d /dev/stune/$grp ]; then
-    [ -f /dev/stune/$grp/schedtune.boost ] && echo 100 > /dev/stune/$grp/schedtune.boost
-    [ -f /dev/stune/$grp/schedtune.prefer_idle ] && echo 0 > /dev/stune/$grp/schedtune.prefer_idle
-    # uclamp.min à 80% si exposé
-    [ -f /dev/stune/$grp/uclamp.min ] && echo 819 > /dev/stune/$grp/uclamp.min 2>/dev/null
-    [ -f /dev/stune/$grp/uclamp.max ] && echo 1024 > /dev/stune/$grp/uclamp.max 2>/dev/null
+for g in top-app foreground; do
+  if [ -d /dev/stune/$g ]; then
+    [ -f /dev/stune/$g/schedtune.boost ] && echo 100  > /dev/stune/$g/schedtune.boost
+    [ -f /dev/stune/$g/schedtune.prefer_idle ] && echo 0 > /dev/stune/$g/schedtune.prefer_idle
+    [ -f /dev/stune/$g/uclamp.min ] && echo 819  > /dev/stune/$g/uclamp.min  2>/dev/null
+    [ -f /dev/stune/$g/uclamp.max ] && echo 1024 > /dev/stune/$g/uclamp.max 2>/dev/null
   fi
 done
 
-# C) input boost (instantané à l'interaction)
+# 2) Input boost (saut instantané sur interaction)
 if [ -d /sys/module/cpu_boost/parameters ]; then
-  # format: "cpu:freq cpu:freq ..."
   max_any=""
   for pol in /sys/devices/system/cpu/cpufreq/policy*; do
     [ -d "$pol" ] || continue
-    mx=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null | grep -Eo '[0-9]+')
-    [ -n "$mx" ] && max_any="$mx"
+    m=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null | grep -Eo '[0-9]+')
+    [ -n "$m" ] && max_any="$m"
   done
   if [ -n "$max_any" ]; then
     echo "0:$max_any 1:$max_any 2:$max_any 3:$max_any 4:$max_any 5:$max_any 6:$max_any 7:$max_any" \
@@ -251,63 +122,81 @@ if [ -d /sys/module/cpu_boost/parameters ]; then
   fi
 fi
 
-# D) Gouverneur + min/max par policy (min = max-1)
+# 3) Gouverneur BIOSHOCK + min/max (min = max-1), sinon fallback
 for pol in /sys/devices/system/cpu/cpufreq/policy*; do
   [ -d "$pol" ] || continue
 
-  # governor
-  if [ -f "$pol/scaling_available_governors" ]; then
-    if grep -q schedutil "$pol/scaling_available_governors"; then
-      write "$pol/scaling_governor" schedutil
-    elif grep -q interactive "$pol/scaling_available_governors"; then
-      write "$pol/scaling_governor" interactive
-    fi
+  # a) choisir le gouverneur
+  govline=""
+  [ -f "$pol/scaling_available_governors" ] && govline=$(cat "$pol/scaling_available_governors")
+  if echo "$govline" | grep -q "bioshock"; then
+    write "$pol/scaling_governor" bioshock
+    echo "[CPU] $(basename "$pol"): governor=bioshock"
+  elif echo "$govline" | grep -q "schedutil"; then
+    write "$pol/scaling_governor" schedutil
+    echo "[CPU] $(basename "$pol"): governor=schedutil (fallback)"
+  elif echo "$govline" | grep -q "interactive"; then
+    write "$pol/scaling_governor" interactive
+    echo "[CPU] $(basename "$pol"): governor=interactive (fallback)"
   fi
 
-  # min/max -> max-1 / max
+  # b) min/max -> max-1 / max
+  fmax=""; fmid=""
   if [ -f "$pol/scaling_available_frequencies" ]; then
-    freq_list=$(tr ' ' '\n' < "$pol/scaling_available_frequencies" | awk '$1>0' | sort -n)
-    fmax=$(echo "$freq_list" | tail -n1)
-    fmid=$(echo "$freq_list" | tail -n2 | head -n1)
-    [ -n "$fmid" ] && write "$pol/scaling_min_freq" "$fmid"
-    [ -n "$fmax" ] && write "$pol/scaling_max_freq" "$fmax"
+    lst=$(tr ' ' '\n' < "$pol/scaling_available_frequencies" | awk '$1>0' | sort -n)
+    fmax=$(echo "$lst" | tail -n1)
+    fmid=$(echo "$lst" | tail -n2 | head -n1)
   else
-    # fallback au cpuinfo si pas de liste
     fmax=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null | grep -Eo '[0-9]+')
-    if [ -n "$fmax" ] && [ -f "$pol/scaling_min_freq" ] && [ -f "$pol/scaling_max_freq" ]; then
-      write "$pol/scaling_max_freq" "$fmax"
-      # met 90% du max en min
-      fmin=$(( fmax * 9 / 10 ))
-      write "$pol/scaling_min_freq" "$fmin"
-    fi
+    [ -n "$fmax" ] && fmid=$(( fmax * 9 / 10 ))
+  fi
+  [ -n "$fmid" ] && write "$pol/scaling_min_freq" "$fmid"
+  [ -n "$fmax" ] && write "$pol/scaling_max_freq" "$fmax"
+
+  # c) Tuning spécifique BIOSHOCK si le dossier existe
+  if [ -d "$pol/bioshock" ]; then
+    for f in "$pol"/bioshock/*; do
+      k=$(basename "$f")
+      case "$k" in
+        up_threshold)          write "$f" 45 ;;     # déclenche vite la montée
+        down_differential)     write "$f" 10 ;;
+        sampling_rate)         write "$f" 10000 ;;  # 10 ms
+        sampling_down_factor)  write "$f" 1 ;;
+        io_is_busy)            write "$f" 1 ;;
+        up_rate_limit_us)      write "$f" 1000 ;;   # si exposé
+        down_rate_limit_us)    write "$f" 4000 ;;
+        hispeed_load)          write "$f" 60 ;;
+        hispeed_freq)          write "$f" 0 ;;
+        *) : ;;
+      esac
+    done
   fi
 
-  # schedutil knobs
+  # d) Fallback tuning si BIOSHOCK absent
   if [ -d "$pol/schedutil" ]; then
-    write "$pol/schedutil/up_rate_limit_us"  1000   # 1 ms
-    write "$pol/schedutil/down_rate_limit_us" 4000  # 4 ms
-    # certains kernels exposent hispeed_* pour schedutil
+    write "$pol/schedutil/up_rate_limit_us"   1000
+    write "$pol/schedutil/down_rate_limit_us" 4000
     [ -f "$pol/schedutil/hispeed_load" ] && write "$pol/schedutil/hispeed_load" 60
     [ -f "$pol/schedutil/hispeed_freq" ] && write "$pol/schedutil/hispeed_freq" 0
   fi
-
-  # interactive (si fallback)
   if [ -d "$pol/interactive" ]; then
-    write "$pol/interactive/timer_rate"  10000
+    write "$pol/interactive/timer_rate"      10000
     write "$pol/interactive/min_sample_time" 10000
     write "$pol/interactive/go_hispeed_load" 50
-    write "$pol/interactive/hispeed_freq" 0
+    write "$pol/interactive/hispeed_freq"    0
   fi
 done
 
-# E) I/O queue: réduire latence
+# 4) I/O queue basse latence
 for q in /sys/block/*/queue; do
   [ -d "$q" ] || continue
   [ -f "$q/rotational" ] && write "$q/rotational" 0
   [ -f "$q/rq_affinity" ] && write "$q/rq_affinity" 2
   [ -f "$q/nomerges" ] && write "$q/nomerges" 2
+  # optionnel : petite read-ahead
+  [ -f "$q/read_ahead_kb" ] && write "$q/read_ahead_kb" 512
+  [ -f "$q/nr_requests" ]  && write "$q/nr_requests" 256
 done
-
 
 
 
