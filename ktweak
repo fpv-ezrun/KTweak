@@ -209,6 +209,81 @@ done
 
 
 
+###############################################################################
+# === CPU PERFORMANCE GOVERNOR – NO THERMAL, NO LIMITS ===
+###############################################################################
+echo "=== [CPU] PERFORMANCE MODE – No thermal throttling ==="
+
+# 1) Forcer tous les CPUs online
+for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+  [ -d "$cpu" ] || continue
+  if [ -f "$cpu/online" ]; then
+    echo 1 > "$cpu/online" 2>/dev/null
+  fi
+done
+
+# 2) Forcer governor=performance + max clock
+for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+  [ -d "$pol" ] || continue
+  if [ -f "$pol/scaling_available_governors" ] && grep -q "performance" "$pol/scaling_available_governors"; then
+    echo performance > "$pol/scaling_governor" 2>/dev/null
+  fi
+  if [ -f "$pol/cpuinfo_max_freq" ]; then
+    fmax=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null)
+    echo "$fmax" > "$pol/scaling_min_freq" 2>/dev/null
+    echo "$fmax" > "$pol/scaling_max_freq" 2>/dev/null
+    echo "[CPU] $(basename "$pol") : max_freq=$fmax"
+  fi
+done
+
+# 3) Désactiver core_ctl (limite dynamique de cores)
+for ctl in /sys/devices/system/cpu/cpu*/core_ctl /sys/devices/system/cpu/core_ctl*; do
+  [ -d "$ctl" ] || continue
+  for f in "$ctl"/enable "$ctl"/core_ctl_enabled; do
+    [ -f "$f" ] && echo 0 > "$f" 2>/dev/null && echo "[CORE_CTL] $f -> 0"
+  done
+done
+
+# 4) Désactiver msm_thermal et tsens
+for t in /sys/module/msm_thermal/parameters/enabled \
+         /sys/module/msm_thermal/core_control/enabled \
+         /sys/module/msm_thermal/core_control/enabled_mode; do
+  [ -f "$t" ] && echo 0 > "$t" 2>/dev/null && echo "[THERMAL] $t -> 0"
+done
+
+# 5) Désactiver powerclamp
+for p in /sys/module/intel_powerclamp/parameters/enable \
+         /sys/module/msm_powerclamp/parameters/enable; do
+  [ -f "$p" ] && echo 0 > "$p" 2>/dev/null && echo "[PWRCLAMP] $p -> 0"
+done
+
+# 6) Désactiver thermal zones actives
+for zone in /sys/class/thermal/thermal_zone*; do
+  [ -f "$zone/mode" ] && echo disabled > "$zone/mode" 2>/dev/null && echo "[THERMAL] $zone disabled"
+done
+
+# 7) Désactiver les CPUFreq limiters éventuels
+for lim in /sys/module/cpufreq_limit/parameters/enabled \
+           /sys/module/cpufreq_limit/parameters/cpufreq_limit_enable; do
+  [ -f "$lim" ] && echo 0 > "$lim" 2>/dev/null && echo "[LIMIT] $lim -> 0"
+done
+
+# 8) Désactiver suspend, idle states, power collapse
+for idle in /sys/devices/system/cpu/cpu*/cpuidle/state*/disable; do
+  [ -f "$idle" ] && echo 1 > "$idle" 2>/dev/null && echo "[IDLE] $idle -> 1"
+done
+
+# 9) (optionnel) forcer clocks/rails GPU + buses on (si tu veux aussi le GPU constant)
+for f in /sys/class/kgsl/kgsl-3d0/force_clk_on /sys/class/kgsl/kgsl-3d0/force_bus_on /sys/class/kgsl/kgsl-3d0/force_rail_on; do
+  [ -f "$f" ] && echo 1 > "$f" 2>/dev/null
+done
+
+echo "=== [CPU] PERFORMANCE mode appliqué : aucune limite thermique ==="
+
+
+
+
+
 
 ###############################################################################
 # === GPU Adreno 506 : gouverneur SIMPLE_ONDEMAND agressif + GPUBW boosté ===
