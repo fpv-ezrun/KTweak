@@ -51,84 +51,153 @@ echo "Branch: $BRANCH"
 sync
 
 ###############################################################################
-# === CPU BIOSHOCK MAX PERFORMANCE (msm8953 / no fallback) ===
+# === CPU BIOSHOCK MAX BOOST (msm8953) ===
 ###############################################################################
 
-for pol in /sys/devices/system/cpu/cpufreq/policy*; do
-  [ -d "$pol" ] || continue
-  echo "--- $(basename "$pol") ---"
+echo "=== [CPU] BIOSHOCK MAX BOOST ==="
 
-  # Debug: liste des governors exposés
-  if [ -f "$pol/scaling_available_governors" ]; then
-    echo "[DBG] available_governors: $(cat "$pol/scaling_available_governors" 2>/dev/null)"
-  else
-    echo "[DBG] no scaling_available_governors"
-  fi
-  cur_before="$(cat "$pol/scaling_governor" 2>/dev/null)"
-  echo "[DBG] current governor before: $cur_before"
-
-echo "=== [CPU] BIOSHOCK governor tuning ==="
-
-# Paramètres globaux du scheduler / VM
+# 0) Paramètres scheduler/vm agressifs mais sûrs
 write /proc/sys/kernel/perf_cpu_time_max_percent 0
 write /proc/sys/kernel/sched_autogroup_enabled 0
 write /proc/sys/kernel/sched_child_runs_first 1
 write /proc/sys/kernel/sched_tunable_scaling 0
+
+# Latences très basses
 write /proc/sys/kernel/sched_latency_ns            "$SCHED_PERIOD"
 write /proc/sys/kernel/sched_min_granularity_ns    "$((SCHED_PERIOD / SCHED_TASKS))"
 write /proc/sys/kernel/sched_wakeup_granularity_ns "$((SCHED_PERIOD / 2))"
 write /proc/sys/kernel/sched_migration_cost_ns     50000
 write /proc/sys/kernel/sched_nr_migrate            64
 write /proc/sys/kernel/sched_schedstats            0
+write /proc/sys/kernel/printk_devkmsg              off
 
-# Réduction du bruit I/O et VM
+# VM/I-O
 write /proc/sys/vm/dirty_background_ratio   10
 write /proc/sys/vm/dirty_ratio              30
 write /proc/sys/vm/dirty_expire_centisecs   3000
 write /proc/sys/vm/dirty_writeback_centisecs 3000
 write /proc/sys/vm/page-cluster             0
 write /proc/sys/vm/stat_interval            10
+write /proc/sys/vm/swappiness               100
+write /proc/sys/vm/vfs_cache_pressure       400
 
-# Gouverneur BIOSHOCK unique
+# Réglages réseau utiles au streaming
+write /proc/sys/net/ipv4/tcp_ecn         1
+write /proc/sys/net/ipv4/tcp_fastopen    3
+write /proc/sys/net/ipv4/tcp_syncookies  0
+
+# sched_features (si dispo)
+if [ -f /sys/kernel/debug/sched_features ]; then
+  write /sys/kernel/debug/sched_features NEXT_BUDDY
+  write /sys/kernel/debug/sched_features TTWU_QUEUE
+fi
+
+# 1) stune/cpuset/uclamp : mettre l’app en tête
+if [ -d /dev/cpuset ]; then
+  for g in top-app foreground; do
+    [ -f /dev/cpuset/$g/cpus ] && echo 0-7 > /dev/cpuset/$g/cpus 2>/dev/null
+  done
+fi
+for g in top-app foreground; do
+  if [ -d /dev/stune/$g ]; then
+    [ -f /dev/stune/$g/schedtune.boost ] && echo 100  > /dev/stune/$g/schedtune.boost
+    [ -f /dev/stune/$g/schedtune.prefer_idle ] && echo 0 > /dev/stune/$g/schedtune.prefer_idle
+    [ -f /dev/stune/$g/uclamp.min ] && echo 819  > /dev/stune/$g/uclamp.min  2>/dev/null
+    [ -f /dev/stune/$g/uclamp.max ] && echo 1024 > /dev/stune/$g/uclamp.max 2>/dev/null
+  fi
+done
+
+# 2) Input boost (saut instantané sur interaction)
+if [ -d /sys/module/cpu_boost/parameters ]; then
+  max_any=""
+  for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$pol" ] || continue
+    m=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null | grep -Eo '[0-9]+')
+    [ -n "$m" ] && max_any="$m"
+  done
+  if [ -n "$max_any" ]; then
+    echo "0:$max_any 1:$max_any 2:$max_any 3:$max_any 4:$max_any 5:$max_any 6:$max_any 7:$max_any" \
+      > /sys/module/cpu_boost/parameters/input_boost_freq 2>/dev/null
+    echo 150 > /sys/module/cpu_boost/parameters/input_boost_ms 2>/dev/null
+  fi
+fi
+
+# 3) Gouverneur BIOSHOCK + min/max (min = max-1), sinon fallback
 for pol in /sys/devices/system/cpu/cpufreq/policy*; do
   [ -d "$pol" ] || continue
 
-  echo "[CPU] $(basename "$pol"): BIOSHOCK tuning..."
+  # a) choisir le gouverneur
+  govline=""
+  [ -f "$pol/scaling_available_governors" ] && govline=$(cat "$pol/scaling_available_governors")
+  if echo "$govline" | grep -q "bioshock"; then
+    write "$pol/scaling_governor" bioshock
+    echo "[CPU] $(basename "$pol"): governor=bioshock"
+  elif echo "$govline" | grep -q "schedutil"; then
+    write "$pol/scaling_governor" schedutil
+    echo "[CPU] $(basename "$pol"): governor=schedutil (fallback)"
+  elif echo "$govline" | grep -q "interactive"; then
+    write "$pol/scaling_governor" interactive
+    echo "[CPU] $(basename "$pol"): governor=interactive (fallback)"
+  fi
 
-  # Forcer le governor BIOSHOCK
-  write "$pol/scaling_governor" bioshock
-
-  # Verrouiller min/max au plus haut palier disponible
+  # b) min/max -> max-1 / max
+  fmax=""; fmid=""
   if [ -f "$pol/scaling_available_frequencies" ]; then
     lst=$(tr ' ' '\n' < "$pol/scaling_available_frequencies" | awk '$1>0' | sort -n)
     fmax=$(echo "$lst" | tail -n1)
     fmid=$(echo "$lst" | tail -n2 | head -n1)
-    write "$pol/scaling_min_freq" "$fmid"
-    write "$pol/scaling_max_freq" "$fmax"
+  else
+    fmax=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null | grep -Eo '[0-9]+')
+    [ -n "$fmax" ] && fmid=$(( fmax * 9 / 10 ))
+  fi
+  [ -n "$fmid" ] && write "$pol/scaling_min_freq" "$fmid"
+  [ -n "$fmax" ] && write "$pol/scaling_max_freq" "$fmax"
+
+  # c) Tuning spécifique BIOSHOCK si le dossier existe
+  if [ -d "$pol/bioshock" ]; then
+    for f in "$pol"/bioshock/*; do
+      k=$(basename "$f")
+      case "$k" in
+        up_threshold)          write "$f" 45 ;;     # déclenche vite la montée
+        down_differential)     write "$f" 10 ;;
+        sampling_rate)         write "$f" 10000 ;;  # 10 ms
+        sampling_down_factor)  write "$f" 1 ;;
+        io_is_busy)            write "$f" 1 ;;
+        up_rate_limit_us)      write "$f" 1000 ;;   # si exposé
+        down_rate_limit_us)    write "$f" 4000 ;;
+        hispeed_load)          write "$f" 60 ;;
+        hispeed_freq)          write "$f" 0 ;;
+        *) : ;;
+      esac
+    done
   fi
 
-  # Chemin vers les paramètres du governor
-  GOVPATH="$pol/bioshock"
-
-  # === Tunables BIOSHOCK ===
-  write "$GOVPATH/up_threshold"         40      # seuil d'accélération ultra-réactif
-  write "$GOVPATH/down_threshold"       5       # redescend doucement
-  write "$GOVPATH/sampling_rate_min"    10000   # 10 ms
-  write "$GOVPATH/sampling_rate"        10000   # idem pour cohérence
-  write "$GOVPATH/sampling_down_factor" 1       # jamais de retard à la baisse
-  write "$GOVPATH/ignore_nice_load"     1       # ignore tâches de fond
-  write "$GOVPATH/freq_step"            100     # monte directement au max (100 % step)
+  # d) Fallback tuning si BIOSHOCK absent
+  if [ -d "$pol/schedutil" ]; then
+    write "$pol/schedutil/up_rate_limit_us"   1000
+    write "$pol/schedutil/down_rate_limit_us" 4000
+    [ -f "$pol/schedutil/hispeed_load" ] && write "$pol/schedutil/hispeed_load" 60
+    [ -f "$pol/schedutil/hispeed_freq" ] && write "$pol/schedutil/hispeed_freq" 0
+  fi
+  if [ -d "$pol/interactive" ]; then
+    write "$pol/interactive/timer_rate"      10000
+    write "$pol/interactive/min_sample_time" 10000
+    write "$pol/interactive/go_hispeed_load" 50
+    write "$pol/interactive/hispeed_freq"    0
+  fi
 done
 
-# File I/O optimisation
+# 4) I/O queue basse latence
 for q in /sys/block/*/queue; do
   [ -d "$q" ] || continue
-  write "$q/rotational" 0
-  write "$q/rq_affinity" 2
-  write "$q/nomerges" 2
-  write "$q/read_ahead_kb" 2048
-  write "$q/nr_requests" 1024
+  [ -f "$q/rotational" ] && write "$q/rotational" 0
+  [ -f "$q/rq_affinity" ] && write "$q/rq_affinity" 2
+  [ -f "$q/nomerges" ] && write "$q/nomerges" 2
+  # optionnel : petite read-ahead
+  [ -f "$q/read_ahead_kb" ] && write "$q/read_ahead_kb" 512
+  [ -f "$q/nr_requests" ]  && write "$q/nr_requests" 256
 done
+
 
 
 
