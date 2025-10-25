@@ -13,6 +13,7 @@ SCHED_PERIOD="$((1 * 1000 * 1000))"
 # How many tasks should we have at a maximum in one scheduling period
 SCHED_TASKS="32"
 
+echo "toto"
 
 write() {
 	# Bail out if file does not exist
@@ -143,7 +144,7 @@ do
 	avail_govs="$(cat "$cpu/scaling_available_governors")"
 
 	# Attempt to set the governor in this order
-	for governor in schedutil performance
+	for governor in schedutil interactive
 	do
 		# Once a matching governor is found, set it and break for this CPU
 		if [[ "$avail_govs" == *"$governor"* ]]
@@ -167,8 +168,8 @@ do
 	write "$governor/hispeed_freq" "$UINT_MAX"
 done
 
-# Apply governor specific tunables for performance
-find /sys/devices/system/cpu/ -name performance -type d | while IFS= read -r governor
+# Apply governor specific tunables for interactive
+find /sys/devices/system/cpu/ -name interactive -type d | while IFS= read -r governor
 do
 	# Consider changing frequencies once per scheduling period
 	write "$governor/timer_rate" "$((SCHED_PERIOD / 1000))"
@@ -199,351 +200,91 @@ do
 	write "$queue/iostats" 0
 
 	# Reduce heuristic read-ahead in exchange for I/O latency
-	write "$queue/read_ahead_kb" 512
+	write "$queue/read_ahead_kb" 256
 
 	# Reduce the maximum number of I/O requests in exchange for latency
-	write "$queue/nr_requests" 256
+	write "$queue/nr_requests" 128
 done
-
-
-
-
 
 ###############################################################################
-# === CPU PERFORMANCE GOVERNOR – NO THERMAL, NO LIMITS ===
+# === GPU tuning (Adreno 506 - mode stable & debug) ===
 ###############################################################################
-echo "=== [CPU] PERFORMANCE MODE – No thermal throttling ==="
+if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
+    echo "=== [GPU] Tuning Adreno 506 ==="
 
-# 1) Forcer tous les CPUs online
-for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
-  [ -d "$cpu" ] || continue
-  if [ -f "$cpu/online" ]; then
-    echo 1 > "$cpu/online" 2>/dev/null
-  fi
-done
-
-# 2) Forcer governor=performance + max clock
-for pol in /sys/devices/system/cpu/cpufreq/policy*; do
-  [ -d "$pol" ] || continue
-  if [ -f "$pol/scaling_available_governors" ] && grep -q "performance" "$pol/scaling_available_governors"; then
-    echo performance > "$pol/scaling_governor" 2>/dev/null
-  fi
-  if [ -f "$pol/cpuinfo_max_freq" ]; then
-    fmax=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null)
-    echo "$fmax" > "$pol/scaling_min_freq" 2>/dev/null
-    echo "$fmax" > "$pol/scaling_max_freq" 2>/dev/null
-    echo "[CPU] $(basename "$pol") : max_freq=$fmax"
-  fi
-done
-
-# 3) Désactiver core_ctl (limite dynamique de cores)
-for ctl in /sys/devices/system/cpu/cpu*/core_ctl /sys/devices/system/cpu/core_ctl*; do
-  [ -d "$ctl" ] || continue
-  for f in "$ctl"/enable "$ctl"/core_ctl_enabled; do
-    [ -f "$f" ] && echo 0 > "$f" 2>/dev/null && echo "[CORE_CTL] $f -> 0"
-  done
-done
-
-# 4) Désactiver msm_thermal et tsens
-for t in /sys/module/msm_thermal/parameters/enabled \
-         /sys/module/msm_thermal/core_control/enabled \
-         /sys/module/msm_thermal/core_control/enabled_mode; do
-  [ -f "$t" ] && echo 0 > "$t" 2>/dev/null && echo "[THERMAL] $t -> 0"
-done
-
-# 5) Désactiver powerclamp
-for p in /sys/module/intel_powerclamp/parameters/enable \
-         /sys/module/msm_powerclamp/parameters/enable; do
-  [ -f "$p" ] && echo 0 > "$p" 2>/dev/null && echo "[PWRCLAMP] $p -> 0"
-done
-
-# 6) Désactiver thermal zones actives
-for zone in /sys/class/thermal/thermal_zone*; do
-  [ -f "$zone/mode" ] && echo disabled > "$zone/mode" 2>/dev/null && echo "[THERMAL] $zone disabled"
-done
-
-# 7) Désactiver les CPUFreq limiters éventuels
-for lim in /sys/module/cpufreq_limit/parameters/enabled \
-           /sys/module/cpufreq_limit/parameters/cpufreq_limit_enable; do
-  [ -f "$lim" ] && echo 0 > "$lim" 2>/dev/null && echo "[LIMIT] $lim -> 0"
-done
-
-# 8) Désactiver suspend, idle states, power collapse
-for idle in /sys/devices/system/cpu/cpu*/cpuidle/state*/disable; do
-  [ -f "$idle" ] && echo 1 > "$idle" 2>/dev/null && echo "[IDLE] $idle -> 1"
-done
-
-# 9) (optionnel) forcer clocks/rails GPU + buses on (si tu veux aussi le GPU constant)
-for f in /sys/class/kgsl/kgsl-3d0/force_clk_on /sys/class/kgsl/kgsl-3d0/force_bus_on /sys/class/kgsl/kgsl-3d0/force_rail_on; do
-  [ -f "$f" ] && echo 1 > "$f" 2>/dev/null
-done
-
-echo "=== [CPU] PERFORMANCE mode appliqué : aucune limite thermique ==="
-
-
-
-
-
-
-###############################################################################
-# === GPU Adreno 506 : gouverneur SIMPLE_ONDEMAND agressif + GPUBW boosté ===
-###############################################################################
-if [ -d /sys/class/kgsl/kgsl-3d0 ]; then
-  echo "=== [GPU] Adreno 506 : mode SIMPLE_ONDEMAND BOOST ==="
-
-  # Gouverneur préféré : simple_ondemand
-  if [ -f /sys/class/kgsl/kgsl-3d0/devfreq/available_governors ]; then
-    if grep -q "simple_ondemand" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors; then
-      write /sys/class/kgsl/kgsl-3d0/devfreq/governor simple_ondemand
-      echo "[GPU] governor=simple_ondemand"
-    elif grep -q "ondemand" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors; then
-      write /sys/class/kgsl/kgsl-3d0/devfreq/governor ondemand
-      echo "[GPU] governor=ondemand"
-    elif grep -q "msm-adreno-tz" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors; then
-      write /sys/class/kgsl/kgsl-3d0/devfreq/governor msm-adreno-tz
-      echo "[GPU] governor=msm-adreno-tz (fallback)"
+    # Choisir le gouverneur le plus stable
+    if grep -q "cpufreq" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
+        write /sys/class/kgsl/kgsl-3d0/devfreq/governor cpufreq
+        echo "[GPU] Governor: cpufreq"
+    elif grep -q "msm-adreno-tz" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
+        write /sys/class/kgsl/kgsl-3d0/devfreq/governor msm-adreno-tz
+        echo "[GPU] Governor: msm-adreno-tz"
     else
-      write /sys/class/kgsl/kgsl-3d0/devfreq/governor performance
-      echo "[GPU] governor=performance (fallback)"
+        write /sys/class/kgsl/kgsl-3d0/devfreq/governor performance
+        echo "[GPU] Governor: performance"
     fi
-  fi
 
-  # Lecture des fréquences disponibles
-  if [ -f /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies ]; then
-    gpu_freqs=$(tr ' ' '\n' < /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies | awk '$1>0' | sort -n)
-    gpu_max=$(echo "$gpu_freqs" | tail -n 1)
-    gpu_mid=$(echo "$gpu_freqs" | tail -n 2 | head -n 1)
+    # Appliquer des limites stables
+    max_freq=$(cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq)
+    if [[ -n "$max_freq" ]]; then
+        min_freq=$((max_freq * 7 / 10))
+        write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq "$min_freq"
+        write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq "$max_freq"
+        echo "[GPU] Frequencies: min=${min_freq}Hz, max=${max_freq}Hz"
+    fi
 
-    # Fixe min au palier max-1 et max au palier max
-    [ -n "$gpu_mid" ] && write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq "$gpu_mid"
-    [ -n "$gpu_max" ] && write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq "$gpu_max"
-
-    echo "[GPU] freqs: min=$gpu_mid max=$gpu_max"
-  fi
-
-  # Paramètres internes du gouverneur simple_ondemand si exposés
-  for f in /sys/class/kgsl/kgsl-3d0/devfreq/simple_ondemand/*; do
-    case "$(basename "$f")" in
-      up_threshold)        write "$f" 45 ;;    # boost plus vite
-      down_differential)   write "$f" 10 ;;
-      sampling_rate)       write "$f" 10000 ;; # µs
-      io_is_busy)          write "$f" 1 ;;
-      sampling_down_factor) write "$f" 1 ;;
-      *) : ;;
-    esac
-  done
-
-  # Force la mise sous tension complète du bloc GPU
-  [ -f /sys/class/kgsl/kgsl-3d0/force_clk_on ] && write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
-  [ -f /sys/class/kgsl/kgsl-3d0/force_bus_on ] && write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
-  [ -f /sys/class/kgsl/kgsl-3d0/force_rail_on ] && write /sys/class/kgsl/kgsl-3d0/force_rail_on 1
+    # Garder bus/rails actifs
+    write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
+    write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
+    write /sys/class/kgsl/kgsl-3d0/force_rail_on 1
 fi
 
 ###############################################################################
-# === GPUBW : mode PERFORMANCE + tuning agressif ===
+# === GPUBW (Bus mémoire GPU) ===
 ###############################################################################
-if [ -d /sys/class/devfreq/soc:qcom,gpubw ]; then
-  echo "=== [GPUBW] Bus mémoire GPU ==="
-
-  # Gouverneur performance si dispo
-  if [ -f /sys/class/devfreq/soc:qcom,gpubw/available_governors ]; then
-    if grep -q "performance" /sys/class/devfreq/soc:qcom,gpubw/available_governors; then
-      write /sys/class/devfreq/soc:qcom,gpubw/governor performance
-      echo "[GPUBW] governor=performance"
-    else
-      write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq
-      echo "[GPUBW] governor=cpufreq (fallback)"
+if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
+    echo "=== [GPU] GPUBW tuning ==="
+    max_bw=$(cat /sys/class/devfreq/soc:qcom,gpubw/max_freq)
+    if [[ -n "$max_bw" ]]; then
+        write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq
+        write /sys/class/devfreq/soc:qcom,gpubw/min_freq "$((max_bw * 7 / 10))"
+        write /sys/class/devfreq/soc:qcom,gpubw/max_freq "$max_bw"
+        echo "[GPUBW] Governor: cpufreq | min=$(($max_bw * 7 / 10)) | max=$max_bw"
     fi
-  fi
-
-  # Boost complet sur la bande passante GPU
-  if [ -f /sys/class/devfreq/soc:qcom,gpubw/max_freq ]; then
-    gpubw_max=$(cat /sys/class/devfreq/soc:qcom,gpubw/max_freq | grep -Eo '[0-9]+')
-    [ -n "$gpubw_max" ] && write /sys/class/devfreq/soc:qcom,gpubw/min_freq "$gpubw_max"
-    echo "[GPUBW] freq min=max=$gpubw_max"
-  fi
 fi
 
-
-
-
 ###############################################################################
-# === VENUS / DSP : SSR RELATED + AGGRESSIVE freq tuning (L1-safe-ish) ===
+# === Diagnostic Verbose (affiche logs système pertinents directement) ===
 ###############################################################################
-echo "=== [VPU/DSP] Stabilisation + tuning AGRESSIF (Widevine L1 toléré) ==="
+echo "=== [DEBUG] Collecte de logs kernel / system ==="
 
-# -- 1) Forcer restart_level=RELATED sur venus/adsp
-echo "=== [SSR] Mise à jour restart_level (msm_subsys) ==="
-for d in /sys/bus/msm_subsys/devices/*; do
-  [ -d "$d" ] || continue
-  nfile="$d/name"; rfile="$d/restart_level"
-  [ -f "$nfile" ] && [ -f "$rfile" ] || continue
-  name=$(cat "$nfile" 2>/dev/null)
-  if echo "$name" | grep -qiE 'venus|adsp'; then
-    cur=$(cat "$rfile" 2>/dev/null)
-    echo "[SSR] $name: restart_level current=$cur"
-    echo RELATED > "$rfile" 2>/dev/null && echo "[SSR] $name: restart_level -> RELATED"
-  fi
+# GPU & kernel faults
+echo "--- Derniers GPU / KGSL / Adreno faults ---"
+dmesg | grep -iE "kgsl|adreno|gpu|kgsl-3d0|hang|fault|watchdog|panic" | tail -n 20
+
+# DSP / Audio / Video (crashs codec, dolby, venus, vidc, adsp)
+echo "--- Derniers logs multimédia / audio / video ---"
+dmesg | grep -iE "adsp|audio|dsp|video|vidc|venus|q6|fatal|reset" | tail -n 20
+
+# Kernel panic summary (si présent)
+if grep -q "Kernel panic" /proc/last_kmsg 2>/dev/null; then
+    echo "--- Extrait du dernier kernel panic ---"
+    grep -iE "panic|kgsl|adreno|adsp|fatal" /proc/last_kmsg | tail -n 20
+else
+    echo "--- Aucun kernel panic enregistré ---"
+fi
+
+# Résumé rapide
+echo "=== [DEBUG] Températures actuelles ==="
+for t in /sys/class/thermal/thermal_zone*/temp; do
+    [[ -f "$t" ]] || continue
+    name=$(basename "$(dirname "$t")")
+    val=$(cat "$t")
+    echo "$name: $((val / 1000))°C"
 done
 
-# -- 2) Fonction tuning agressif (palier max-1 si possible)
-tune_devfreq_aggressive() {
-  dev="$1"
-  [ -d "$dev" ] || return 0
-  [ -f "$dev/governor" ] && write "$dev/governor" performance
-
-  if [ -f "$dev/available_frequencies" ]; then
-    # Extraction sans tableau (compat Android shell)
-    freqs=$(tr ' ' '\n' < "$dev/available_frequencies" | awk '$1>0' | sort -n)
-    count=$(echo "$freqs" | wc -l)
-    if [ "$count" -lt 2 ]; then
-      echo "[VPU] $dev: pas assez de paliers, skip"
-      return 0
-    fi
-
-    # Choisir le palier max-1
-    target=$(echo "$freqs" | tail -n 2 | head -n 1)
-    [ -f "$dev/min_freq" ] && write "$dev/min_freq" "$target"
-    [ -f "$dev/max_freq" ] && write "$dev/max_freq" "$target"
-    echo "[VPU] AGGR $dev -> min=max=$target"
-
-  elif [ -f "$dev/max_freq" ] && [ -f "$dev/min_freq" ]; then
-    maxv=$(cat "$dev/max_freq" | grep -Eo '[0-9]+')
-    if [ ! -z "$maxv" ]; then
-      expr "$maxv" + 1 >/dev/null 2>&1 || { echo "[VPU] $dev: max_freq invalide ($maxv)"; return 0; }
-      write "$dev/min_freq" "$maxv"
-      write "$dev/max_freq" "$maxv"
-      echo "[VPU] AGGR $dev -> min=max=$maxv"
-    else
-      echo "[VPU] $dev: max_freq vide, skip"
-    fi
-  else
-    echo "[VPU] $dev: aucun nœud de fréquence utilisable, skip"
-  fi
-}
-
-# -- 3) Appliquer tuning agressif sur tous les modules vidéo/DSP
-echo "=== [VPU/DSP] Tuning freq (AGGRESSIVE) ==="
-for dev in /sys/class/devfreq/*venus* /sys/class/devfreq/*vidc* /sys/class/devfreq/*video* /sys/class/devfreq/*adsp*; do
-  [ -d "$dev" ] || continue
-  tune_devfreq_aggressive "$dev"
-done
-
-# -- 4) Empêcher la mise en veille complète du bloc VIDC si possible
-for f in /sys/kernel/debug/msm_vidc/*/disable_pc /sys/kernel/debug/msm_vidc/disable_pc; do
-  [ -f "$f" ] && write "$f" 1 && echo "[VPU] disable_pc activé sur $f"
-done
-
-# -- 5) Diagnostic court pour vérifier état
-echo "=== [VPU DEBUG] États venus/adsp récents ==="
-dmesg | grep -iE "venus|vidc|sysmon_send_shutdown|Brought out of reset|zap|mdt|b0[234]" | tail -n 80
-
-
-
-
-# Rendre le SSR plus verbeux (debug)
-echo 1 > /sys/module/subsystem_restart/parameters/enable_debug 2>/dev/null
-
+echo "=== [DEBUG] Fin de la collecte ==="
 ###############################################################################
-# === Option YouTube/ads : éviter VP9/HEVC HW (réduit triggers de reset venus) ===
-###############################################################################
-# Si HEVC HW indispensable pour certaines apps DRM, commente ces deux lignes :
-setprop debug.media.omx.disable.vp9 true
-setprop debug.media.omx.disable.hevc true
-
-# --- VPU durability tweaks ---
-# 1) Désactiver UBWC (souvent source de reset sur msm8953 lors des changements de flux)
-setprop vendor.video.disable.ubwc 1
-
-# 2) Quand un device devfreq *venus*/*video* n'a pas assez de paliers, ne pas tenter min/max
-for d in /sys/class/devfreq/*venus* /sys/class/devfreq/*vidc* /sys/class/devfreq/*video*; do
-  [ -d "$d" ] || continue
-  if [ -f "$d/available_frequencies" ]; then
-    cnt=$(tr ' ' '\n' < "$d/available_frequencies" | awk '$1>0' | wc -l)
-    if [ "$cnt" -lt 2 ] && [ -f "$d/governor" ]; then
-      write "$d/governor" performance
-      echo "[VPU] $d -> governor=performance (single-step devfreq)"
-    fi
-  fi
-done
-
-
-
-
-
-
-
-
-###############################################################################
-# DEBUG court
-echo "=== [DEBUG] Derniers VENUS/KGSL ==="
-dmesg | grep -iE "venus|vidc|kgsl|adreno|detach context|sysmon_send_shutdown|Brought out of reset|OPP not found" | tail -n 120
-echo "=== [DEBUG] Fin bloc perf/stab ==="
-
-
-###############################################################################
-# === AUDIO / ADSP STABILISATION (Dolby actif, L1 préservé) ===
-# But : éviter les resets ADSP lors des changements de codec/volume élevés
-#       -> on désactive l'audio "compress offload" (DSP) et MMAP
-#       -> on garde la vidéo Widevine L1 (pipeline vidéo inchangé)
-###############################################################################
-echo "=== [AUDIO] Stabilisation ADSP / Dolby ==="
-
-# 1) Désactiver l'audio offload (fait décoder l'audio côté CPU en PCM)
-setprop vendor.audio.offload.disable 1
-setprop audio.offload.disable 1
-setprop vendor.audio.offload.passthrough 0
-setprop vendor.audio.offload.multiple.enabled 0
-setprop vendor.audio.offload.track.enable 0
-setprop vendor.audio.offload.gapless.enabled 0
-
-# Désactiver offload pour codecs sensibles (AC3/EAC3/AAC change souvent sur pubs)
-setprop vendor.audio.offload.codec.ac3 false
-setprop vendor.audio.offload.codec.eac3 false
-setprop vendor.audio.offload.codec.aac false
-
-# 2) Éviter AAudio/MMAP (souvent instable sur anciens SoC)
-setprop aaudio.mmap_policy 2                 # 2 = NEVER
-setprop aaudio.mmap_exclusive_policy 2
-
-# 3) Forcer le chemin PCM "classique" (moins d'effets, plus stable)
-setprop persist.vendor.audio.fluence.speaker false
-setprop persist.vendor.audio.fluence.voicecall false
-setprop persist.vendor.audio.fluence.voicerec false
-
-# 4) Garder Dolby chargé mais réduire les risques d’overdrive (option doux)
-#    -> si ça continue de rebooter au volume max, décommente la ligne bypass.
-setprop persist.vendor.dolby.dap.bypass 1   # Bypass DAP, garde le service, baisse la charge DSP
-setprop vendor.audio_hal.period_size 192
-setprop vendor.audio.adm.buffering.ms 12
-
-# === AUDIO FX/Dolby hardening ===
-
-# Ignorer la chaîne d'effets Android (évite conflits VINTF / librairies manquantes)
-setprop ro.audio.ignore_effects true
-setprop vendor.audio.disable_effects true
-
-
-# 5) Donner la priorité CPU aux services audio/codecs (latence ↓)
-for p in audioserver media.codec media.swcodec mediaserver; do
-  for pid in $(pidof "$p" 2>/dev/null); do
-    echo "$pid" > /dev/stune/top-app/tasks 2>/dev/null
-  done
-done
-
-# 6) Snapshot debug utile après réglages
-echo "=== [AUDIO DEBUG] Props clés ==="
-getprop vendor.audio.offload.disable
-getprop audio.offload.disable
-getprop vendor.audio.offload.codec.ac3
-getprop vendor.audio.offload.codec.eac3
-getprop aaudio.mmap_policy
-getprop persist.vendor.dolby.dap.bypass
-getprop vendor.audio_hal.period_size
-getprop vendor.audio.adm.buffering.ms
-echo "=== [AUDIO DEBUG] Derniers logs ADSP/audio ==="
-dmesg | grep -iE "adsp|audio|q6|apr|fatal|reset" | tail -n 80
-
 
 # Always return success, even if the last write fails
 exit 0
