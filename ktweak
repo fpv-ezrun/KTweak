@@ -1,290 +1,362 @@
 #!/usr/bin/env bash
-# Written by Draco (tytydraco @ GitHub)
+# ==========================================================================================
+#  PROFILE: OVERDRIVE / MAX-PERF (R&D STRESS ONLY)
+#  - Pousse CPU/GPU/RAM/IO à fond : gouverneurs "performance", fréquences au max,
+#    latences minimisées, caches agressifs, BBR, etc.
+#  - **ATTENTION** : usage labo uniquement. Peut chauffer, vider la batterie,
+#    réduire la durée de vie, provoquer des throttles et de l'instabilité.
+#    Ne désactive PAS les protections thermiques (volontaire).
+# ==========================================================================================
 
-# The name of the current branch for logging purposes
-BRANCH="balance"
+set -Eeuo pipefail
 
-# Maximum unsigned integer size in C
-UINT_MAX="4294967295"
-
-# Duration in nanoseconds of one scheduling period
-SCHED_PERIOD="$((1 * 1000 * 1000))"
-
-# How many tasks should we have at a maximum in one scheduling period
-SCHED_TASKS="32"
-
+BRANCH="overdrive"
 echo "toto"
 
+# =========================
+# === Utilitaires I/O ====
+# =========================
+log()   { echo "[*] $*"; }
+warn()  { echo "[!] $*" >&2; }
+fail()  { echo "[x] $*" >&2; }
+
 write() {
-	# Bail out if file does not exist
-	[[ ! -f "$1" ]] && return 1
-
-	# Make file writable in case it is not already
-	chmod +w "$1" 2> /dev/null
-
-	# Write the new value and bail if there's an error
-	if ! echo "$2" > "$1" 2> /dev/null
-	then
-		echo "Failed: $1 → $2"
-		return 1
-	fi
-
-	# Log the success
-	echo "$1 → $2"
+  local path="$1" val="${2:-}"
+  [[ -z "${path}" || ! -e "${path}" ]] && return 1
+  chmod u+w "${path}" 2>/dev/null || true
+  if ! printf '%s' "${val}" > "${path}" 2>/dev/null; then
+    fail "Failed: ${path} → ${val}"
+    return 1
+  fi
+  echo "${path} → ${val}"
 }
 
-# Check for root permissions and bail if not granted
-if [[ "$(id -u)" -ne 0 ]]
-then
-	echo "No root permissions. Exiting."
-	exit 1
+append_if_supported() {
+  local path="$1" token="$2"
+  [[ -e "${path}" ]] || return 1
+  if grep -qw "${token}" "${path}"; then
+    printf '%s' "${token}" > "${path}" 2>/dev/null && echo "${path} += ${token}"
+  fi
+}
+
+# ===============================
+# === Preconditions / Contexte ==
+# ===============================
+if [[ "$(id -u)" -ne 0 ]]; then
+  fail "Exécuter en root."
+  exit 1
 fi
 
-# Detect if we are running on Android
-grep -q android /proc/cmdline && ANDROID=true
+ANDROID=false
+grep -qi android /proc/cmdline && ANDROID=true
 
-# Log the date and time for records sake
-echo "Time of execution: $(date)"
-echo "Branch: $BRANCH"
-
-# Sync to data in the rare case a device crashes
+echo "Heure: $(date)"
+echo "Profil: ${BRANCH}"
 sync
 
-# Limit max perf event processing time to this much CPU usage
-write /proc/sys/kernel/perf_cpu_time_max_percent 0
+# ====================================
+# === Constantes / paramètres base ===
+# ====================================
+# Période d'ordonnancement (ns) – courte pour réactivité
+SCHED_PERIOD_NS=$((1 * 1000 * 1000))   # 1 ms
+SCHED_TASKS=32
 
-# Group tasks for less stutter but less throughput
-write /proc/sys/kernel/sched_autogroup_enabled 0
+# ==========================
+# === Kernel / Scheduler ===
+# ==========================
+# Perf events non limités (0 = illimité)
+write /proc/sys/kernel/perf_cpu_time_max_percent 0 || true
 
-# Execute child process before parent after fork
-write /proc/sys/kernel/sched_child_runs_first 1
+# Pas d'autogroup → moins d'overhead
+write /proc/sys/kernel/sched_autogroup_enabled 0 || true
 
-# Preliminary requirement for the following values
-write /proc/sys/kernel/sched_tunable_scaling 0
+# Les enfants s'exécutent avant le parent après fork
+write /proc/sys/kernel/sched_child_runs_first 1 || true
 
-# Reduce the maximum scheduling period for lower latency
-write /proc/sys/kernel/sched_latency_ns "$SCHED_PERIOD"
+# Désactiver scaling heuristique
+write /proc/sys/kernel/sched_tunable_scaling 0 || true
 
-# Schedule this ratio of tasks in the guarenteed sched period
-write /proc/sys/kernel/sched_min_granularity_ns "$((SCHED_PERIOD / SCHED_TASKS))"
+# Latences faibles + time slice court
+write /proc/sys/kernel/sched_latency_ns "${SCHED_PERIOD_NS}" || true
+write /proc/sys/kernel/sched_min_granularity_ns "$((SCHED_PERIOD_NS / SCHED_TASKS))" || true
+# Favoriser le préemptif agressif
+write /proc/sys/kernel/sched_wakeup_granularity_ns 0 || true
 
-# Require preeptive tasks to surpass half of a sched period in vmruntime
-write /proc/sys/kernel/sched_wakeup_granularity_ns "$((SCHED_PERIOD / 2))"
+# Réduire migrations (garder les caches chauds)
+write /proc/sys/kernel/sched_migration_cost_ns 500000 || true  # 0.5 ms
+write /proc/sys/kernel/sched_nr_migrate 128 || true
 
-# Reduce the frequency of task migrations
-write /proc/sys/kernel/sched_migration_cost_ns 50000
+# Stats scheduler off → moins d'overhead
+write /proc/sys/kernel/sched_schedstats 0 || true
 
-# Always allow sched boosting on top-app tasks
-[[ "$ANDROID" == true ]] && write /proc/sys/kernel/sched_min_task_util_for_colocation 0
+# Boost global (EAS) si dispo
+[[ -e /proc/sys/kernel/sched_boost ]] && write /proc/sys/kernel/sched_boost 1 || true
 
-# Improve real time latencies by reducing the scheduler migration time
-write /proc/sys/kernel/sched_nr_migrate 64
+# Réduire les logs noyau au strict minimum
+[[ -e /proc/sys/kernel/printk ]] && write /proc/sys/kernel/printk "0 0 0 0" || true
+write /proc/sys/kernel/printk_devkmsg off || true
 
-# Disable scheduler statistics to reduce overhead
-write /proc/sys/kernel/sched_schedstats 0
-
-# Disable unnecessary printk logging
-write /proc/sys/kernel/printk_devkmsg off
-
-# Start non-blocking writeback later
-write /proc/sys/vm/dirty_background_ratio 10
-
-# Start blocking writeback later
-write /proc/sys/vm/dirty_ratio 30
-
-# Require dirty memory to stay in memory for longer
-write /proc/sys/vm/dirty_expire_centisecs 3000
-
-# Run the dirty memory flusher threads less often
-write /proc/sys/vm/dirty_writeback_centisecs 3000
-
-# Disable read-ahead for swap devices
-write /proc/sys/vm/page-cluster 0
-
-# Update /proc/stat less often to reduce jitter
-write /proc/sys/vm/stat_interval 10
-
-# Swap to the swap device at a fair rate
-write /proc/sys/vm/swappiness 100
-
-# Fairly prioritize page cache and file structures
-write /proc/sys/vm/vfs_cache_pressure 400
-
-# Enable Explicit Congestion Control
-write /proc/sys/net/ipv4/tcp_ecn 1
-
-# Enable fast socket open for receiver and sender
-write /proc/sys/net/ipv4/tcp_fastopen 3
-
-# Disable SYN cookies
-write /proc/sys/net/ipv4/tcp_syncookies 0
-
-if [[ -f "/sys/kernel/debug/sched_features" ]]
-then
-	# Consider scheduling tasks that are eager to run
-	write /sys/kernel/debug/sched_features NEXT_BUDDY
-
-	# Schedule tasks on their origin CPU if possible
-	write /sys/kernel/debug/sched_features TTWU_QUEUE
+# Features de scheduling debug (si présents)
+if [[ -f /sys/kernel/debug/sched_features ]]; then
+  # Favoriser la réutilisation CPU et les réveils efficaces
+  append_if_supported /sys/kernel/debug/sched_features NO_ENERGY_AWARE
+  append_if_supported /sys/kernel/debug/sched_features NEXT_BUDDY
+  append_if_supported /sys/kernel/debug/sched_features TTWU_QUEUE
 fi
 
-[[ "$ANDROID" == true ]] && if [[ -d "/dev/stune/" ]]
-then
-	# We are not concerned with prioritizing latency
-	write /dev/stune/top-app/schedtune.prefer_idle 0
+# =================
+# === Mémoire VM ==
+# =================
+# Dirty writeback plus tard → +débit (attention aux pertes en cas de crash)
+write /proc/sys/vm/dirty_background_ratio 10 || true
+write /proc/sys/vm/dirty_ratio 40 || true
+write /proc/sys/vm/dirty_expire_centisecs 3000 || true
+write /proc/sys/vm/dirty_writeback_centisecs 3000 || true
 
-	# Mark top-app as boosted, find high-performing CPUs
-	write /dev/stune/top-app/schedtune.boost 100
+# Statistiques VM moins fréquentes
+write /proc/sys/vm/stat_interval 10 || true
+
+# Swappiness minimal → éviter le swap (performances)
+write /proc/sys/vm/swappiness 1 || true
+
+# Garder agressivement caches VFS
+write /proc/sys/vm/vfs_cache_pressure 50 || true
+
+# Read-ahead swap désactivé
+write /proc/sys/vm/page-cluster 0 || true
+
+# THP agressif si dispo
+[[ -e /sys/kernel/mm/transparent_hugepage/enabled ]] && write /sys/kernel/mm/transparent_hugepage/enabled always || true
+[[ -e /sys/kernel/mm/transparent_hugepage/defrag  ]] && write /sys/kernel/mm/transparent_hugepage/defrag  always || true
+
+# Augmenter les mappings si lourds workloads
+[[ -e /proc/sys/vm/max_map_count ]] && write /proc/sys/vm/max_map_count 1048576 || true
+
+# Désactiver KSM si présent (évite l’overhead CPU)
+if [[ -e /sys/kernel/mm/ksm/run ]]; then
+  write /sys/kernel/mm/ksm/run 0 || true
 fi
 
-# Loop over each CPU in the system
-for cpu in /sys/devices/system/cpu/cpu*/cpufreq
-do
-	# Fetch the available governors from the CPU
-	avail_govs="$(cat "$cpu/scaling_available_governors")"
+# =====================
+# === Réseau (TCP) ====
+# =====================
+# BBR + FQ pour latence faible et débit élevé
+[[ -e /proc/sys/net/core/default_qdisc ]] && write /proc/sys/net/core/default_qdisc fq || true
+if [[ -e /proc/sys/net/ipv4/tcp_congestion_control ]]; then
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    write /proc/sys/net/ipv4/tcp_congestion_control bbr
+  fi
+fi
 
-	# Attempt to set the governor in this order
-	for governor in schedutil interactive
-	do
-		# Once a matching governor is found, set it and break for this CPU
-		if [[ "$avail_govs" == *"$governor"* ]]
-		then
-			write "$cpu/scaling_governor" "$governor"
-			break
-		fi
-	done
+# ECN + Fast Open
+write /proc/sys/net/ipv4/tcp_ecn 1 || true
+write /proc/sys/net/ipv4/tcp_fastopen 3 || true
+
+# Backlog large
+[[ -e /proc/sys/net/core/somaxconn ]] && write /proc/sys/net/core/somaxconn 4096 || true
+
+# ==================
+# === CPU / CStates
+# ==================
+# Désactiver watchdog NMI (overhead)
+[[ -e /proc/sys/kernel/nmi_watchdog ]] && write /proc/sys/kernel/nmi_watchdog 0 || true
+
+# Désactiver les états d’idle profonds (latence ↓, perf ↑, conso ↑)
+for s in /sys/devices/system/cpu/cpu*/cpuidle/state*/disable; do
+  [[ -e "$s" ]] && write "$s" 1 || true
 done
 
-# Apply governor specific tunables for schedutil
-find /sys/devices/system/cpu/ -name schedutil -type d | while IFS= read -r governor
-do
-	# Consider changing frequencies once per scheduling period
-	write "$governor/up_rate_limit_us" "$((SCHED_PERIOD / 1000))"
-	write "$governor/down_rate_limit_us" "$((2 * SCHED_PERIOD / 1000))"
-	write "$governor/rate_limit_us" "$((SCHED_PERIOD / 1000))"
+# Turbo/Boost
+[[ -e /sys/devices/system/cpu/intel_pstate/no_turbo ]] && write /sys/devices/system/cpu/intel_pstate/no_turbo 0 || true
+[[ -e /sys/devices/system/cpu/cpufreq/boost          ]] && write /sys/devices/system/cpu/cpufreq/boost 1 || true
+[[ -e /sys/devices/system/cpu/cpufreq/amd_pstate/status ]] && write /sys/devices/system/cpu/cpufreq/amd_pstate/status active || true
 
-	# Jump to hispeed frequency at this load percentage
-	write "$governor/hispeed_load" 1
-	write "$governor/hispeed_freq" "$UINT_MAX"
+# Gouverneur CPU : performance + verrouillage min/max = max
+for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+  [[ -d "$pol" ]] || continue
+  maxf=""
+  if [[ -e "$pol/scaling_max_freq" ]]; then
+    maxf="$(cat "$pol/cpuinfo_max_freq" 2>/dev/null || true)"
+    [[ -n "${maxf}" ]] && write "$pol/scaling_max_freq" "${maxf}" || true
+    [[ -n "${maxf}" ]] && write "$pol/scaling_min_freq" "${maxf}" || true
+  fi
+
+  # Choix du gouverneur
+  if grep -qw performance "$pol/scaling_available_governors" 2>/dev/null; then
+    write "$pol/scaling_governor" performance
+  elif grep -qw schedutil "$pol/scaling_available_governors" 2>/dev/null; then
+    write "$pol/scaling_governor" schedutil
+  elif grep -qw interactive "$pol/scaling_available_governors" 2>/dev/null; then
+    write "$pol/scaling_governor" interactive
+  fi
+
+  # Tuning gouverneurs si présents
+  if [[ -d "$pol/schedutil" ]]; then
+    # Changement de freq immédiat
+    write "$pol/schedutil/up_rate_limit_us"   0 || true
+    write "$pol/schedutil/down_rate_limit_us" 0 || true
+    write "$pol/schedutil/rate_limit_us"      0 || true
+  fi
+  if [[ -d "$pol/interactive" ]]; then
+    # hispeed au max
+    [[ -n "${maxf}" ]] && write "$pol/interactive/hispeed_freq" "${maxf}" || true
+    write "$pol/interactive/go_hispeed_load" 1 || true
+    write "$pol/interactive/timer_rate" 20000 || true
+    write "$pol/interactive/min_sample_time" 20000 || true
+  fi
 done
 
-# Apply governor specific tunables for interactive
-find /sys/devices/system/cpu/ -name interactive -type d | while IFS= read -r governor
-do
-	# Consider changing frequencies once per scheduling period
-	write "$governor/timer_rate" "$((SCHED_PERIOD / 1000))"
-	write "$governor/min_sample_time" "$((SCHED_PERIOD / 1000))"
+# Compat Android : cpusets / stune au taquet
+if [[ "${ANDROID}" == true ]]; then
+  # Tous les CPU alloués aux groupes actifs
+  ONLINE="$(cat /sys/devices/system/cpu/online 2>/dev/null || echo 0)"
+  for cg in /dev/cpuset/top-app /dev/cpuset/foreground /dev/cpuset/background /dev/cpuset/system-background; do
+    [[ -d "$cg" && -w "$cg/cpus" ]] && write "$cg/cpus" "${ONLINE}" || true
+  done
 
-	# Jump to hispeed frequency at this load percentage
-	write "$governor/go_hispeed_load" 1
-	write "$governor/hispeed_freq" "$UINT_MAX"
-done
+  # Boost schedtune
+  if [[ -d /dev/stune ]]; then
+    write /dev/stune/top-app/schedtune.boost 100 || true
+    [[ -e /dev/stune/top-app/schedtune.prefer_idle ]] && write /dev/stune/top-app/schedtune.prefer_idle 0 || true
+    [[ -e /dev/stune/top-app/schedtune.prefer_high_cap ]] && write /dev/stune/top-app/schedtune.prefer_high_cap 1 || true
+  fi
+fi
 
-for queue in /sys/block/*/queue
-do
-	# Choose the first governor available
-	avail_scheds="$(cat "$queue/scheduler")"
-	for sched in cfq noop kyber bfq mq-deadline none
-	do
-		if [[ "$avail_scheds" == *"$sched"* ]]
-		then
-			write "$queue/scheduler" "$sched"
-			break
-		fi
-	done
-
-	# Do not use I/O as a source of randomness
-	write "$queue/add_random" 0
-
-	# Disable I/O statistics accounting
-	write "$queue/iostats" 0
-
-	# Reduce heuristic read-ahead in exchange for I/O latency
-	write "$queue/read_ahead_kb" 256
-
-	# Reduce the maximum number of I/O requests in exchange for latency
-	write "$queue/nr_requests" 128
-done
-
-###############################################################################
-# === GPU tuning (Adreno 506 - mode stable & debug) ===
-###############################################################################
+# =========================
+# === GPU / DEVFREQ KGSL ==
+# =========================
 if [[ -d /sys/class/kgsl/kgsl-3d0 ]]; then
-    echo "=== [GPU] Tuning Adreno 506 ==="
+  log "[GPU] Tuning KGSL"
 
-    # Choisir le gouverneur le plus stable
-    if grep -q "cpufreq" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
-        write /sys/class/kgsl/kgsl-3d0/devfreq/governor cpufreq
-        echo "[GPU] Governor: cpufreq"
-    elif grep -q "msm-adreno-tz" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
-        write /sys/class/kgsl/kgsl-3d0/devfreq/governor msm-adreno-tz
-        echo "[GPU] Governor: msm-adreno-tz"
+  # Gouverneur performance si possible
+  if grep -qw performance /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
+    write /sys/class/kgsl/kgsl-3d0/devfreq/governor performance
+  elif grep -qw msm-adreno-tz /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
+    write /sys/class/kgsl/kgsl-3d0/devfreq/governor msm-adreno-tz
+  elif grep -qw cpufreq /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
+    write /sys/class/kgsl/kgsl-3d0/devfreq/governor cpufreq
+  fi
+
+  # Min/Max = Max
+  if [[ -e /sys/class/kgsl/kgsl-3d0/devfreq/max_freq ]]; then
+    MAX_GPU="$(cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq)"
+    [[ -n "${MAX_GPU}" ]] && write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq "${MAX_GPU}" || true
+    [[ -n "${MAX_GPU}" ]] && write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq "${MAX_GPU}" || true
+  fi
+
+  # Pwrlevels : 0 = perf max
+  if [[ -e /sys/class/kgsl/kgsl-3d0/num_pwrlevels ]]; then
+    write /sys/class/kgsl/kgsl-3d0/min_pwrlevel 0 || true
+    write /sys/class/kgsl/kgsl-3d0/max_pwrlevel 0 || true
+    [[ -e /sys/class/kgsl/kgsl-3d0/default_pwrlevel ]] && write /sys/class/kgsl/kgsl-3d0/default_pwrlevel 0 || true
+  fi
+
+  # Garder horloges/bus/rails actifs + idle timer nul
+  write /sys/class/kgsl/kgsl-3d0/force_clk_on 1 || true
+  write /sys/class/kgsl/kgsl-3d0/force_bus_on 1 || true
+  write /sys/class/kgsl/kgsl-3d0/force_rail_on 1 || true
+  [[ -e /sys/class/kgsl/kgsl-3d0/idle_timer ]] && write /sys/class/kgsl/kgsl-3d0/idle_timer 0 || true
+fi
+
+# GPUBW et autres devfreq : forcer performance + min=max
+for df in /sys/class/devfreq/*; do
+  [[ -d "$df" ]] || continue
+  if [[ -e "$df/available_governors" && -w "$df/governor" ]]; then
+    if grep -qw performance "$df/available_governors"; then
+      write "$df/governor" performance
+    elif grep -qw cpufreq "$df/available_governors"; then
+      write "$df/governor" cpufreq
+    fi
+  fi
+  if [[ -e "$df/max_freq" ]]; then
+    MAXBW="$(cat "$df/max_freq" 2>/dev/null || true)"
+    [[ -n "${MAXBW}" && -w "$df/min_freq" ]] && write "$df/min_freq" "${MAXBW}" || true
+    [[ -n "${MAXBW}" ]] && write "$df/max_freq" "${MAXBW}" || true
+  fi
+done
+
+# ===================
+# === Stockage I/O ==
+# ===================
+for queue in /sys/block/*/queue; do
+  [[ -d "$queue" ]] || continue
+
+  # Choisir l’ordonnanceur : none > mq-deadline > kyber > bfq > noop
+  if [[ -w "$queue/scheduler" ]]; then
+    avail="$(cat "$queue/scheduler" 2>/dev/null || true)"
+    for s in none mq-deadline kyber bfq noop; do
+      if [[ "$avail" == *"$s"* ]]; then
+        write "$queue/scheduler" "$s"
+        break
+      fi
+    done
+  fi
+
+  # Pas d'entropie via I/O + pas d'iostats
+  [[ -w "$queue/add_random" ]] && write "$queue/add_random" 0 || true
+  [[ -w "$queue/iostats"    ]] && write "$queue/iostats" 0 || true
+  [[ -w "$queue/rq_affinity" ]] && write "$queue/rq_affinity" 2 || true
+
+  # Read-ahead : SSD/NVMe élevé, HDD modéré
+  if [[ -e "$queue/rotational" ]] && [[ -e "$queue/read_ahead_kb" ]]; then
+    if [[ "$(cat "$queue/rotational")" -eq 0 ]]; then
+      write "$queue/read_ahead_kb" 2048
+      [[ -w "$queue/nr_requests" ]] && write "$queue/nr_requests" 1024 || true
     else
-        write /sys/class/kgsl/kgsl-3d0/devfreq/governor performance
-        echo "[GPU] Governor: performance"
+      write "$queue/read_ahead_kb" 128
+      [[ -w "$queue/nr_requests" ]] && write "$queue/nr_requests" 256  || true
     fi
+  fi
+done
 
-    # Appliquer des limites stables
-    max_freq=$(cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq)
-    if [[ -n "$max_freq" ]]; then
-        min_freq=$((max_freq * 7 / 10))
-        write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq "$min_freq"
-        write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq "$max_freq"
-        echo "[GPU] Frequencies: min=${min_freq}Hz, max=${max_freq}Hz"
-    fi
+# ===================================
+# === Compatibilité de l'ancien code
+# ===================================
+# Conserver quelques valeurs issues du script original lorsqu'elles ne nuisent pas.
+# (beaucoup sont déjà couvertes / renforcées ci-dessus)
+UINT_MAX="4294967295"
+# Ajustements "interactive"/"schedutil" supplémentaires si exposés ailleurs que policy*
+find /sys/devices/system/cpu/ -name schedutil -type d 2>/dev/null | while IFS= read -r g; do
+  write "$g/up_rate_limit_us" 0 || true
+  write "$g/down_rate_limit_us" 0 || true
+  write "$g/rate_limit_us" 0 || true
+  # hispeed_* non standard -> ignoré si absent
+  [[ -e "$g/hispeed_load" ]] && write "$g/hispeed_load" 1 || true
+done
+find /sys/devices/system/cpu/ -name interactive -type d 2>/dev/null | while IFS= read -r g; do
+  write "$g/timer_rate" 20000 || true
+  write "$g/min_sample_time" 20000 || true
+  [[ -e "$g/hispeed_freq" ]] && write "$g/hispeed_freq" "$UINT_MAX" || true
+  [[ -e "$g/go_hispeed_load" ]] && write "$g/go_hispeed_load" 1 || true
+done
 
-    # Garder bus/rails actifs
-    write /sys/class/kgsl/kgsl-3d0/force_clk_on 1
-    write /sys/class/kgsl/kgsl-3d0/force_bus_on 1
-    write /sys/class/kgsl/kgsl-3d0/force_rail_on 1
-fi
-
-###############################################################################
-# === GPUBW (Bus mémoire GPU) ===
-###############################################################################
-if [[ -d /sys/class/devfreq/soc:qcom,gpubw ]]; then
-    echo "=== [GPU] GPUBW tuning ==="
-    max_bw=$(cat /sys/class/devfreq/soc:qcom,gpubw/max_freq)
-    if [[ -n "$max_bw" ]]; then
-        write /sys/class/devfreq/soc:qcom,gpubw/governor cpufreq
-        write /sys/class/devfreq/soc:qcom,gpubw/min_freq "$((max_bw * 7 / 10))"
-        write /sys/class/devfreq/soc:qcom,gpubw/max_freq "$max_bw"
-        echo "[GPUBW] Governor: cpufreq | min=$(($max_bw * 7 / 10)) | max=$max_bw"
-    fi
-fi
-
-###############################################################################
-# === Diagnostic Verbose (affiche logs système pertinents directement) ===
-###############################################################################
+# =====================
+# === Diagnostics ====
+# =====================
 echo "=== [DEBUG] Collecte de logs kernel / system ==="
 
-# GPU & kernel faults
 echo "--- Derniers GPU / KGSL / Adreno faults ---"
-dmesg | grep -iE "kgsl|adreno|gpu|kgsl-3d0|hang|fault|watchdog|panic" | tail -n 20
+dmesg | grep -iE "kgsl|adreno|gpu|kgsl-3d0|hang|fault|watchdog|panic" 2>/dev/null | tail -n 20 || true
 
-# DSP / Audio / Video (crashs codec, dolby, venus, vidc, adsp)
 echo "--- Derniers logs multimédia / audio / video ---"
-dmesg | grep -iE "adsp|audio|dsp|video|vidc|venus|q6|fatal|reset" | tail -n 20
+dmesg | grep -iE "adsp|audio|dsp|video|vidc|venus|q6|fatal|reset" 2>/dev/null | tail -n 20 || true
 
-# Kernel panic summary (si présent)
 if grep -q "Kernel panic" /proc/last_kmsg 2>/dev/null; then
-    echo "--- Extrait du dernier kernel panic ---"
-    grep -iE "panic|kgsl|adreno|adsp|fatal" /proc/last_kmsg | tail -n 20
+  echo "--- Extrait du dernier kernel panic ---"
+  grep -iE "panic|kgsl|adreno|adsp|fatal" /proc/last_kmsg 2>/dev/null | tail -n 20 || true
 else
-    echo "--- Aucun kernel panic enregistré ---"
+  echo "--- Aucun kernel panic enregistré ---"
 fi
 
-# Résumé rapide
 echo "=== [DEBUG] Températures actuelles ==="
 for t in /sys/class/thermal/thermal_zone*/temp; do
-    [[ -f "$t" ]] || continue
-    name=$(basename "$(dirname "$t")")
-    val=$(cat "$t")
-    echo "$name: $((val / 1000))°C"
+  [[ -f "$t" ]] || continue
+  name=$(basename "$(dirname "$t")")
+  val=$(cat "$t" 2>/dev/null || echo 0)
+  [[ -n "$val" ]] && echo "$name: $((val / 1000))°C"
 done
 
 echo "=== [DEBUG] Fin de la collecte ==="
-###############################################################################
 
-# Always return success, even if the last write fails
+# Toujours 0 (on est en mode best-effort, beaucoup de chemins peuvent ne pas exister)
 exit 0
