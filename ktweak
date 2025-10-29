@@ -8,9 +8,6 @@
 #    Ne désactive PAS les protections thermiques (volontaire).
 # ==========================================================================================
 
-set -Eeuo pipefail
-
-BRANCH="overdrive"
 echo "toto"
 
 # =========================
