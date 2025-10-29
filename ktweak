@@ -3,6 +3,18 @@
 # Objectif: pousser CPU/GPU/RAM/I/O au max pour lecture vidéo (R&D, sans filet).
 # Compatible mksh/POSIX (Android). Ignore silencieusement ce qui n'existe pas.
 
+
+
+
+
+
+
+
+
+
+
+
+
 set -u
 BRANCH="balance"
 LOG_TAG="[OVERDRIVE]"
