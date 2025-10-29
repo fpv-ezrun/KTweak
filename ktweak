@@ -1,21 +1,15 @@
-#!/usr/bin/env bash
-# Overdrive performance profile for Galaxy Tab A 10.5 (SM-T590 / gta2xlwifi)
-# Objectif: pousser CPU / GPU / RAM / I/O au maximum pour lecture vidéo.
-# Usage: exécuter en root (su) après boot. Idempotent, ignore silencieusement ce qui n'existe pas.
-# NB: Ce script va à fond (thermal, gouverneurs, cgroups…). À utiliser uniquement en R&D.
+#!/system/bin/sh
+# Overdrive performance profile pour Galaxy Tab A 10.5 (SM-T590 / gta2xlwifi)
+# Objectif: pousser CPU/GPU/RAM/I/O au max pour lecture vidéo (R&D, sans filet).
+# Compatible mksh/POSIX (Android). Ignore silencieusement ce qui n'existe pas.
 
 set -u
 
-BRANCH="overdrive"
-LOG_TAG="[OVERDRIVE]"
+log() { echo "$LOG_TAG $*"; }
 
-# --- Helpers -----------------------------------------------------------------
-
-log(){ echo "$LOG_TAG $*"; }
-
-write(){
-  local path="$1" val="$2"
-  [[ ! -e "$path" ]] && return 1
+write() {
+  path="$1"; val="$2"
+  [ ! -e "$path" ] && return 1
   chmod +w "$path" 2>/dev/null
   if ! printf "%s" "$val" > "$path" 2>/dev/null; then
     echo "Failed: $path → $val"
@@ -24,79 +18,64 @@ write(){
   echo "$path → $val"
 }
 
-cat_silent(){ [[ -e "$1" ]] && cat "$1" 2>/dev/null || true; }
+cat_silent() { [ -e "$1" ] && cat "$1" 2>/dev/null || true; }
 
-# returns last (max) numeric from a whitespace list
-last_number(){
-  awk '
-    {
-      for(i=1;i<=NF;i++){
-        if($i ~ /^[0-9]+$/){ last=$i }
-      }
-    }
-    END{ if(last!="") print last }
-  '
+last_number() {
+  # renvoie le dernier nombre trouvé dans l'entrée
+  awk '{for(i=1;i<=NF;i++){if($i ~ /^[0-9]+$/) last=$i}} END{if(last!="") print last}'
 }
 
-# Parse CPU list "0-7" → count
-cpu_count_from_range(){
-  local r="$1"
-  if [[ "$r" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-    echo $(( ${BASH_REMATCH[2]} - ${BASH_REMATCH[1]} + 1 ))
-  elif [[ "$r" =~ ^([0-9]+)$ ]]; then
-    echo 1
-  else
-    # fallback for "0,1,2,3"
-    awk -F',' '{print NF}' <<<"$r"
-  fi
+cpu_count_from_range() {
+  r="$1"
+  case "$r" in
+    *-*)
+      start=$(echo "$r" | awk -F'-' '{print $1}')
+      end=$(echo "$r"   | awk -F'-' '{print $2}')
+      [ -z "$start" ] && start=0
+      [ -z "$end" ] && end="$start"
+      echo $(( end - start + 1 ))
+      ;;
+    *)
+      # "0" ou "0,1,2,3"
+      echo "$r" | awk -F',' '{print NF}'
+      ;;
+  esac
 }
 
-require_root(){
-  if [[ "$(id -u)" -ne 0 ]]; then
+require_root() {
+  if [ "$(id -u)" -ne 0 ]; then
     echo "No root permissions. Exiting."
     exit 1
   fi
 }
 
-# --- Preamble ----------------------------------------------------------------
-
 require_root
-grep -q android /proc/cmdline && ANDROID=true || ANDROID=false
+grep -q android /proc/cmdline 2>/dev/null && ANDROID=true || ANDROID=false
 
 log "Time: $(date) | Branch: $BRANCH | Android: $ANDROID"
 
-# Sync in case on bascule dur
 sync
 
-# --- Kernel scheduler & sysctl ----------------------------------------------
-
-# Autoriser RT sans throttling (dangerux mais max perf)
+# -------- Scheduler / kernel sysctl --------
 write /proc/sys/kernel/sched_rt_runtime_us -1
-
-# Baisser la latence, limiter migrations, booster top-app
 write /proc/sys/kernel/sched_tunable_scaling 0
 write /proc/sys/kernel/sched_latency_ns         $((4 * 1000 * 1000))     # 4ms
 write /proc/sys/kernel/sched_min_granularity_ns $((1 * 1000 * 1000))     # 1ms
 write /proc/sys/kernel/sched_wakeup_granularity_ns $((200 * 1000))       # 0.2ms
-write /proc/sys/kernel/sched_migration_cost_ns  10000000                  # 10ms
+write /proc/sys/kernel/sched_migration_cost_ns  10000000
 write /proc/sys/kernel/sched_nr_migrate         64
 write /proc/sys/kernel/sched_autogroup_enabled  1
 write /proc/sys/kernel/sched_child_runs_first   1
 write /proc/sys/kernel/sched_schedstats         0
 write /proc/sys/kernel/perf_cpu_time_max_percent 5
 write /proc/sys/kernel/printk_devkmsg           off
-
-# Active le sched_boost si présent (EAS)
 write /proc/sys/kernel/sched_boost 1
 
-# DebugFS sched_features (si dispo)
-if [[ -f /sys/kernel/debug/sched_features ]]; then
+if [ -f /sys/kernel/debug/sched_features ]; then
   write /sys/kernel/debug/sched_features "NO_GENTLE_FAIR_SLEEPERS HRTICK NEXT_BUDDY TTWU_QUEUE"
 fi
 
-# --- Mémoire / VM ------------------------------------------------------------
-
-# Objectif: latence basse et éviter swap pendant lecture vidéo
+# -------- Mémoire / VM --------
 write /proc/sys/vm/dirty_background_ratio 5
 write /proc/sys/vm/dirty_ratio            20
 write /proc/sys/vm/dirty_expire_centisecs 1500
@@ -106,47 +85,45 @@ write /proc/sys/vm/stat_interval 10
 write /proc/sys/vm/swappiness 10
 write /proc/sys/vm/vfs_cache_pressure 100
 
-# ZRAM: privilégier LZ4 si disponible
-if [[ -e /sys/block/zram0/comp_algorithm ]]; then
-  if grep -qw lz4 /sys/block/zram0/comp_algorithm; then
+if [ -e /sys/block/zram0/comp_algorithm ]; then
+  if grep -qw lz4 /sys/block/zram0/comp_algorithm 2>/dev/null; then
     write /sys/block/zram0/comp_algorithm lz4
   fi
 fi
 
-# Désactiver fsync si le noyau expose le paramètre (latence I/O au détriment de la sécu)
 write /sys/module/sync/parameters/fsync_enabled 0
 
-# --- Réseau (peu d'impact vidéo locale, utile en streaming) ------------------
-
+# -------- Réseau (streaming) --------
 write /proc/sys/net/ipv4/tcp_ecn 1
 write /proc/sys/net/ipv4/tcp_fastopen 3
 write /proc/sys/net/ipv4/tcp_syncookies 0
-# BBR si dispo
-if [[ -f /proc/sys/net/ipv4/tcp_available_congestion_control ]]; then
-  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
+if [ -f /proc/sys/net/ipv4/tcp_available_congestion_control ]; then
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
     write /proc/sys/net/ipv4/tcp_congestion_control bbr
   fi
 fi
 
-# --- Cgroups: schedtune & cpuset --------------------------------------------
-
-if $ANDROID && [[ -d /dev/stune ]]; then
+# -------- cgroups schedtune / cpuset --------
+if $ANDROID && [ -d /dev/stune ]; then
   write /dev/stune/top-app/schedtune.prefer_idle 0
   write /dev/stune/top-app/schedtune.boost 100
   write /dev/stune/foreground/schedtune.boost 60
   write /dev/stune/background/schedtune.boost -10
 fi
 
-# Allouer tous les CPU à top-app/foreground, restreindre background
-if [[ -d /dev/cpuset ]]; then
+if [ -d /dev/cpuset ]; then
   ALL_CPUS="$(cat_silent /sys/devices/system/cpu/present)"
-  [[ -z "${ALL_CPUS}" ]] && ALL_CPUS="0-$(nproc --all 2>/dev/null | awk '{print $1-1}')"
+  if [ -z "$ALL_CPUS" ]; then
+    NP="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+    ALL_CPUS="0,$(awk -v n="$NP" 'BEGIN{for(i=1;i<n;i++){printf (i==1?"%d":",%d"), i}}')"
+    # si NP fournit, on préfère 0-(n-1) pour compacité
+    ALL_CPUS="0-$(($NP - 1))"
+  fi
 
-  # Calcul du quart pour background
-  CNT=$(cpu_count_from_range "$ALL_CPUS")
-  if [[ "$CNT" -ge 4 ]]; then
+  CNT="$(cpu_count_from_range "$ALL_CPUS")"
+  if [ "$CNT" -ge 4 ]; then
     BG_END=$(( CNT/4 - 1 ))
-    [[ $BG_END -lt 0 ]] && BG_END=0
+    [ "$BG_END" -lt 0 ] && BG_END=0
     BG_CPUS="0-$BG_END"
   else
     BG_CPUS="0"
@@ -159,113 +136,94 @@ if [[ -d /dev/cpuset ]]; then
   write /dev/cpuset/restricted/cpus        "$BG_CPUS"
 fi
 
-# --- CPU: online + gouverneurs + fréquences ---------------------------------
-
-# Online tous les CPU
-for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
-  [[ -e "$cpu/online" ]] && write "$cpu/online" 1
+# -------- CPU online + gouverneurs --------
+for c in /sys/devices/system/cpu/cpu[0-9]*; do
+  [ -e "$c/online" ] && write "$c/online" 1
 done
 
-# Choix gouverneur: performance > schedutil > interactive
-choose_governor(){
-  local avail="$1"
+choose_governor() {
+  avail="$1"
   for g in performance schedutil interactive; do
-    if grep -qw "$g" <<<"$avail"; then
-      echo "$g"; return 0
-    fi
+    echo "$avail" | grep -qw "$g" 2>/dev/null && { echo "$g"; return 0; }
   done
-  echo "" ; return 1
+  echo ""
+  return 1
 }
 
-# Boucle par policy (meilleur que cpu*/cpufreq sur kernels récents)
 for pol in /sys/devices/system/cpu/cpufreq/policy*; do
-  [[ -d "$pol" ]] || continue
+  [ -d "$pol" ] || continue
   avail_govs="$(cat_silent "$pol/scaling_available_governors")"
   gov="$(choose_governor "$avail_govs")"
-  [[ -n "$gov" ]] && write "$pol/scaling_governor" "$gov"
+  [ -n "$gov" ] && write "$pol/scaling_governor" "$gov"
 
-  # Verrouiller au max
   maxf="$(cat_silent "$pol/cpuinfo_max_freq")"
-  [[ -z "$maxf" ]] && maxf="$(cat_silent "$pol/scaling_max_freq")"
-  if [[ -n "$maxf" ]]; then
+  [ -z "$maxf" ] && maxf="$(cat_silent "$pol/scaling_max_freq")"
+  if [ -n "$maxf" ]; then
     write "$pol/scaling_max_freq" "$maxf"
     write "$pol/scaling_min_freq" "$maxf"
   fi
 
-  # Tuning par gouverneur
-  if [[ "$gov" == "schedutil" ]]; then
+  if [ "$gov" = "schedutil" ]; then
     base="$pol/schedutil"
     write "$base/up_rate_limit_us"   0
     write "$base/down_rate_limit_us" 0
     write "$base/rate_limit_us"      0
-    # hispeed = max si exposé
     write "$base/hispeed_load"  80
-    write "$base/hispeed_freq"  "$maxf"
-  elif [[ "$gov" == "interactive" ]]; then
+    [ -n "$maxf" ] && write "$base/hispeed_freq"  "$maxf"
+  elif [ "$gov" = "interactive" ]; then
     base="$pol/interactive"
     write "$base/timer_rate"      0
     write "$base/min_sample_time" 0
     write "$base/go_hispeed_load" 80
-    write "$base/hispeed_freq"    "$maxf"
+    [ -n "$maxf" ] && write "$base/hispeed_freq"  "$maxf"
     write "$base/boost"           1
     write "$base/io_is_busy"      1
   fi
 done
 
-# CPU input boost (Qualcomm)
-if [[ -d /sys/module/cpu_boost/parameters ]]; then
-  # Construire "cpu:freq" pour chaque cpu à max
+if [ -d /sys/module/cpu_boost/parameters ]; then
   IBF=""
   for pol in /sys/devices/system/cpu/cpufreq/policy*; do
-    cmin="$(cat_silent "$pol/cpuinfo_min_freq")"
     cmax="$(cat_silent "$pol/cpuinfo_max_freq")"
-    cpu_id="$(basename "$pol" | tr -cd '0-9')"
-    [[ -n "$cmax" ]] && IBF+="${cpu_id}:${cmax} "
+    cpu_id="$(basename "$pol" | sed 's/[^0-9]//g')"
+    [ -n "$cmax" ] && IBF="${IBF}${cpu_id}:${cmax} "
   done
-  [[ -n "$IBF" ]] && write /sys/module/cpu_boost/parameters/input_boost_freq "$IBF"
+  [ -n "$IBF" ] && write /sys/module/cpu_boost/parameters/input_boost_freq "$IBF"
   write /sys/module/cpu_boost/parameters/input_boost_ms 200
   write /sys/module/cpu_boost/parameters/sched_boost_on_input 1
 fi
 
-# Core control: forcer toutes les cores online si exposé
-if [[ -d /sys/module/core_ctl/parameters ]]; then
+if [ -d /sys/module/core_ctl/parameters ]; then
   write /sys/module/core_ctl/parameters/enable 0
   write /sys/module/core_ctl/parameters/min_cpus 1
 fi
 
-# Désactiver throttling thermique si le noyau l'autorise (AGRESSIF)
 write /sys/module/msm_thermal/parameters/enabled 0
 write /sys/module/msm_thermal/vdd_restriction/enabled 0
 
-# --- GPU (Adreno 506 / KGSL) -------------------------------------------------
-
+# -------- GPU (KGSL/Adreno) --------
 KGSL="/sys/class/kgsl/kgsl-3d0"
-if [[ -d "$KGSL" ]]; then
-  # Garder rails/clk/bus actifs
+if [ -d "$KGSL" ]; then
   write "$KGSL/force_rail_on" 1
   write "$KGSL/force_clk_on"  1
   write "$KGSL/force_bus_on"  1
   write "$KGSL/idle_timer"    0
 
-  # Pwrlevels: 0 = plus perf sur beaucoup de kernels
   write "$KGSL/max_pwrlevel" 0
   write "$KGSL/min_pwrlevel" 0
   write "$KGSL/pwrlevel"     0
 
-  # Devfreq
-  if [[ -d "$KGSL/devfreq" ]]; then
+  if [ -d "$KGSL/devfreq" ]; then
     af="$(cat_silent "$KGSL/devfreq/available_frequencies")"
     maxg="$(printf "%s\n" "$af" | last_number)"
-    [[ -n "$maxg" ]] && {
+    if [ -n "$maxg" ]; then
       write "$KGSL/devfreq/min_freq" "$maxg"
       write "$KGSL/devfreq/max_freq" "$maxg"
-    }
-    # Gouverneur performance si dispo
-    if [[ -f "$KGSL/devfreq/available_governor" ]]; then
-      if grep -qw performance "$KGSL/devfreq/available_governor"; then
+    fi
+    if [ -f "$KGSL/devfreq/available_governor" ]; then
+      if grep -qw performance "$KGSL/devfreq/available_governor" 2>/dev/null; then
         write "$KGSL/devfreq/governor" performance
       else
-        # fallback
         write "$KGSL/devfreq/governor" msm-adreno-tz
       fi
     else
@@ -274,52 +232,44 @@ if [[ -d "$KGSL" ]]; then
   fi
 fi
 
-# Bus/DCVS devfreq: mettre en performance et bloquer au max
+# -------- Bus / devfreq divers --------
 for df in /sys/class/devfreq/*; do
-  [[ -d "$df" ]] || continue
-  # Gouverneur
-  if [[ -f "$df/available_governors" ]] && grep -qw performance "$df/available_governors"; then
+  [ -d "$df" ] || continue
+  if [ -f "$df/available_governors" ] && grep -qw performance "$df/available_governors" 2>/dev/null; then
     write "$df/governor" performance
   else
     write "$df/governor" performance
   fi
-  # Fréquences
   freqs="$(cat_silent "$df/available_frequencies")"
   maxf="$(printf "%s\n" "$freqs" | last_number)"
-  [[ -n "$maxf" ]] && {
+  if [ -n "$maxf" ]; then
     write "$df/min_freq" "$maxf"
     write "$df/max_freq" "$maxf"
-  }
+  fi
 done
 
-# --- I/O schedulers & readahead ---------------------------------------------
-
+# -------- I/O --------
 for queue in /sys/block/*/queue; do
-  [[ -d "$queue" ]] || continue
+  [ -d "$queue" ] || continue
   avail_scheds="$(cat_silent "$queue/scheduler")"
-  # Choisir noop > mq-deadline > none
   for s in noop mq-deadline none kyber bfq cfq; do
-    if [[ "$avail_scheds" == *"$s"* ]]; then
-      write "$queue/scheduler" "$s"
-      break
-    fi
+    echo "$avail_scheds" | grep -q "$s" 2>/dev/null && { write "$queue/scheduler" "$s"; break; }
   done
   write "$queue/add_random" 0
   write "$queue/iostats" 0
   write "$queue/rq_affinity" 2
-  # Readahead élevé pour lecture séquentielle (vidéo)
   write "$queue/read_ahead_kb" 2048
-  # Profondeur requêtes modérée (latence)
   write "$queue/nr_requests" 128
 done
 
-# --- Process priority boost (SurfaceFlinger / codecs / audio) ----------------
-
-renice_rt(){
-  local name="$1" prio="$2" policy="$3" rtprio="$4"
-  # renice
-  pgrep -f "$name" 2>/dev/null | while read -r pid; do
-    renice -n "$prio" -p "$pid" >/dev/null 2>&1
+# -------- Priorités process critiques --------
+renice_rt() {
+  name="$1"; prio="$2"; policy="$3"; rtprio="$4"
+  command -v pgrep >/dev/null 2>&1 || return 0
+  for pid in $(pgrep -f "$name" 2>/dev/null); do
+    if command -v renice >/dev/null 2>&1; then
+      renice -n "$prio" -p "$pid" >/dev/null 2>&1
+    fi
     if command -v chrt >/dev/null 2>&1; then
       chrt -"$policy" -p "$rtprio" "$pid" >/dev/null 2>&1
     fi
@@ -327,7 +277,6 @@ renice_rt(){
   done
 }
 
-# Donner la priorité aux chemins critiques vidéo/affichage
 renice_rt "surfaceflinger"   -20 f 50
 renice_rt "mediacodec"       -20 f 40
 renice_rt "media\.swcodec"   -20 f 40
@@ -337,8 +286,7 @@ renice_rt "audioserver"      -10 f 20
 renice_rt "composer@.*service" -10 f 20
 renice_rt "UIRenderThread|RenderThread|hwui" -10 f 10
 
-# --- SurfaceFlinger / HWUI propriétés (best-effort) --------------------------
-
+# -------- Propriétés Android utiles --------
 if $ANDROID; then
   setprop debug.hwui.disable_vsync 0 2>/dev/null || true
   setprop debug.hwui.renderer opengl 2>/dev/null || true
@@ -346,8 +294,6 @@ if $ANDROID; then
   setprop media.stagefright.enable-player 1 2>/dev/null || true
   setprop media.stagefright.enable-http 1 2>/dev/null || true
 fi
-
-# --- Done --------------------------------------------------------------------
 
 log "Applied maximum performance tuning."
 exit 0
