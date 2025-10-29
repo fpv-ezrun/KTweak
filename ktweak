@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Written by Draco (tytydraco @ GitHub)
+# Written by fpv 
 
 # The name of the current branch for logging purposes
 BRANCH="latency"
