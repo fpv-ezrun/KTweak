@@ -4,6 +4,8 @@
 # Compatible mksh/POSIX (Android). Ignore silencieusement ce qui n'existe pas.
 
 set -u
+BRANCH="balance"
+LOG_TAG="[OVERDRIVE]"
 
 log() { echo "$LOG_TAG $*"; }
 
