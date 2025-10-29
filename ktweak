@@ -2,10 +2,10 @@
 # Overdrive performance profile pour Galaxy Tab A 10.5 (SM-T590 / gta2xlwifi)
 # Objectif: pousser CPU/GPU/RAM/I/O au max pour lecture vidéo (R&D, sans filet).
 # Compatible mksh/POSIX (Android). Ignore silencieusement ce qui n'existe pas.
+
+BRANCH="balance"
 echo "toto start"
 set -u
-BRANCH="balance"
-
 log() { echo "$LOG_TAG $*"; }
 
 write() {
