@@ -5,7 +5,6 @@
 echo "toto start"
 set -u
 BRANCH="balance"
-LOG_TAG="[OVERDRIVE]"
 
 log() { echo "$LOG_TAG $*"; }
 
