@@ -208,14 +208,14 @@ echo "=== [GPU] Tuning Adreno 506 ==="
 
 # Choisir le gouverneur le plus stable
 if grep -q "performance" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
-    write /sys/class/kgsl/kgsl-3d0/devfreq/governor cpufreq
-    echo "[GPU] Governor: cpufreq"
+    write /sys/class/kgsl/kgsl-3d0/devfreq/governor performance
+    echo "[GPU] Governor: performance"
 elif grep -q "msm-adreno-tz" /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null; then
     write /sys/class/kgsl/kgsl-3d0/devfreq/governor msm-adreno-tz
     echo "[GPU] Governor: msm-adreno-tz"
 else
-    write /sys/class/kgsl/kgsl-3d0/devfreq/governor cpufreq
-    echo "[GPU] Governor: cpufreq"
+    write /sys/class/kgsl/kgsl-3d0/devfreq/governor msm-adreno-tz
+    echo "[GPU] Governor: msm-adreno-tz"
 fi
 
 
